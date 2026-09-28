@@ -1,0 +1,3 @@
+node_modules/
+game/dev.html
+game/dev/*.bundle.js

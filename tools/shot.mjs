@@ -1,0 +1,12 @@
+import { chromium } from 'playwright-core';
+const [,, url, out, wait='done', w='1600', h='1000'] = process.argv;
+const b = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium_headless_shell-1194/chrome-linux/headless_shell', args: ['--use-angle=swiftshader','--enable-unsafe-swiftshader','--ignore-gpu-blocklist'] });
+const p = await b.newPage({ viewport: { width: +w, height: +h } });
+p.on('console', m => console.log('[console]', m.type(), m.text().slice(0, 500)));
+p.on('pageerror', e => console.log('[pageerror]', e.message));
+await p.goto(url);
+await p.waitForFunction((t) => document.title === t, wait, { timeout: 120000 }).catch(e => console.log('timeout', e.message));
+const data = await p.evaluate(() => window.__out);
+if (data) console.log(JSON.stringify(data));
+await p.screenshot({ path: out });
+await b.close();
