@@ -8,15 +8,25 @@ más una carpeta de recursos.
 
 - **Mapa desértico** con dos zonas (A y B), medio con puertas, túneles y "largo", generado
   sobre una rejilla de 2 m con texturas PBR y utilería de Poly Haven, cielo HDRI y sombras.
-- **Bots** con el soldado animado de three.js (Idle/Walk/Run), IK de brazos para sujetar el
-  arma, pose de agachado, apuntado con el torso, muerte con caída y hitboxes por hueso
-  (cabeza ×4, pecho, estómago, piernas).
+- **Bots** con el soldado animado de three.js (Idle/Walk/Run), pose de agachado, apuntado con
+  el torso, muerte con caída y hitboxes por hueso (cabeza ×4, pecho, estómago, piernas).
+- **Manos adaptadas a cada arma**: puntos de empuñadura, guardamanos y cargador medidos en cada
+  modelo (`game/src/rigs.js`). IK analítica de dos huesos con vector polar para el codo,
+  orientación de la palma y dedos curvados (índice en el gatillo). Los brazos en primera
+  persona son el mismo soldado con la cabeza oculta.
+- **Recarga animada** en primera persona y en los bots: el cargador real se separa de la malla
+  del rifle (o se genera dentro de la empuñadura en pistolas y AWP), la mano izquierda lo saca,
+  cae al suelo con física, trae uno nuevo, lo encaja y da el golpe final.
 - **IA**: navegación A* con suavizado, rutas de ataque por zona, posiciones de defensa,
   visión con campo de visión y línea de vista, tiempo de reacción, ráfagas, contra-strafe,
   compensación de retroceso, oído (disparos y pasos) y avisos entre compañeros.
 - **Armas**: cuchillo, USP-S, Glock-18, Desert Eagle, MP9, AK-47, M4A4, AWP con mira y granada
-  HE. Dispersión por movimiento/salto/agachado, patrón de retroceso, caída de daño,
-  penetración de blindaje, casquillos, fogonazos, trazadoras, agujeros de bala y sangre.
+  HE. Dispersión por movimiento/salto/agachado, patrón de retroceso, caída de daño y
+  penetración de blindaje.
+- **Efectos de disparo**: fogonazos con varias formas y llamas laterales, luz que ilumina manos y
+  arma, trazadoras que viajan, chispas en estela, fragmentos, polvo, humo del cañón caliente,
+  casquillos (también de los bots), agujeros de bala, niebla y gotas de sangre, y golpe de
+  cámara al disparar.
 - **Rondas y economía**: tiempo de congelación y de compra, menú de compra, recompensas por
   baja, bonus por derrota acumulado, MVP, marcador (Tab) y fin de partido.
 - **Sonido** sintetizado con WebAudio: disparos por arma, recargas, pasos posicionales con

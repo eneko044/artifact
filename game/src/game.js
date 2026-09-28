@@ -82,9 +82,10 @@ export class Game {
     this.map.build();
     this.world = new World(this.map);
     this.nav = new Nav(this.map);
-    this.effects = new Effects(scene);
+    this.effects = new Effects(scene, this.camera);
     this.audio = new Audio();
-    this.effects.onShellBounce = (p) => { if (this.audio.ctx && p.distanceTo(this.camera.position) < 4) this.audio.play('pin', { volume: 0.12, rate: 1.6 + Math.random() * 0.5 }); };
+    this.effects.onShellBounce = (p) => { if (this.audio.ctx && p.distanceTo(this.camera.position) < 6) this.audio.play('pin', { pos: p, volume: 0.25, rate: 1.6 + Math.random() * 0.5 }); };
+    this.effects.onMagLand = (p) => { if (this.audio.ctx && p.distanceTo(this.camera.position) < 15) this.audio.play('bounce', { pos: p, volume: 0.35, rate: 0.6 + Math.random() * 0.2 }); };
 
     this.controller = new PlayerController(this);
     this.resize();
@@ -128,7 +129,7 @@ export class Game {
     const names = { t: BOT_NAMES.t.slice().sort(() => Math.random() - 0.5), ct: BOT_NAMES.ct.slice().sort(() => Math.random() - 0.5) };
     const addBot = (team) => {
       const c = new Combatant({ name: names[team].pop(), team, isBot: true });
-      c.body = new SoldierBody(this.assets, team);
+      c.body = this.makeBody(team);
       this.scene.add(c.body.root);
       c.brain = new BotBrain(this, c);
       this.combatants.push(c);
@@ -176,7 +177,7 @@ export class Game {
       c.pitch = 0;
       if (c.body) {
         this.scene.remove(c.body.root);
-        c.body = new SoldierBody(this.assets, c.team);
+        c.body = this.makeBody(c.team);
         this.scene.add(c.body.root);
         c.body.root.position.copy(c.pos);
         this.equipBody(c);
@@ -193,6 +194,12 @@ export class Game {
     this.hud.roundBanner(`RONDA ${this.round}`, this.roundSubtitle());
     this.hud.refreshAll(this);
     if (this.audio.ctx) this.audio.play('radio', { volume: 0.4 });
+  }
+
+  makeBody(team) {
+    const b = new SoldierBody(this.assets, team);
+    b.onMagDrop = (mag) => this.effects.dropMag(mag);
+    return b;
   }
 
   roundSubtitle() {
@@ -369,9 +376,12 @@ export class Game {
     const vol = c.isPlayer ? 0.45 : 0.6;
     if (this.audio.ctx) {
       const occ = !c.isPlayer && !this.world.lineClear(this.camera.position, pos);
-      this.audio.play('magOut', { pos, volume: vol, delay: def.reload * 0.2, occluded: occ });
-      this.audio.play('magIn', { pos, volume: vol, delay: def.reload * 0.62, occluded: occ });
-      if (def.slot === 1) this.audio.play(def.id === 'awp' ? 'boltBack' : 'boltFwd', { pos, volume: vol, delay: def.reload * 0.86, occluded: occ });
+      const pistol = def.slot === 2;
+      this.audio.play('magOut', { pos, volume: vol, delay: def.reload * (pistol ? 0.13 : 0.18), occluded: occ });
+      if (!pistol) this.audio.play('dry', { pos, volume: vol * 0.5, delay: def.reload * 0.3, occluded: occ, rate: 0.5 });
+      this.audio.play('magIn', { pos, volume: vol, delay: def.reload * 0.61, occluded: occ });
+      this.audio.play('boltBack', { pos, volume: vol, delay: def.reload * 0.76, occluded: occ });
+      this.audio.play('boltFwd', { pos, volume: vol, delay: def.reload * 0.82, occluded: occ });
     }
     if (c.isPlayer) this.vm.reload(def.reload);
   }
@@ -411,18 +421,31 @@ export class Game {
     const hit = this.traceBullet(c, origin, dir, def);
     // Muzzle, tracer, shell, sound.
     let muzzle;
+    const rifle = def.slot === 1;
     if (c.isPlayer) {
-      muzzle = origin.clone().addScaledVector(dir, 0.7).add(new THREE.Vector3(0, -0.1, 0));
+      muzzle = this.camera.localToWorld(this.vm.muzzleCameraSpace());
       this.vm.fire(def);
-      this.effects.flashLight(muzzle, def.suppressed ? 0 : 4, 0.05);
-      if (Math.random() < 0.35 && !def.suppressed) this.effects.tracer(muzzle.clone().addScaledVector(dir, 2), hit.point);
-      const right = new THREE.Vector3(Math.cos(c.yaw), 0, -Math.sin(c.yaw));
-      this.effects.shell(origin.clone().addScaledVector(dir, 0.35).addScaledVector(right, 0.12).add(new THREE.Vector3(0, -0.12, 0)), right.clone().multiplyScalar(1.8 + Math.random()).add(new THREE.Vector3(0, 1.8, 0)).add(c.velocity));
+      this.effects.flashLight(muzzle, def.suppressed ? 0.6 : 5, 0.05);
+      if (!def.suppressed && Math.random() < 0.4) this.effects.tracer(muzzle.clone().addScaledVector(dir, 1.5), hit.point, 650);
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+      const upv = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion);
+      const ej = this.camera.localToWorld(new THREE.Vector3(0.12, -0.13, -0.55));
+      if (def.id !== 'awp') this.effects.shell(ej, right.multiplyScalar(1.6 + Math.random()).addScaledVector(upv, 1.4 + Math.random() * 0.6).add(c.velocity), rifle);
+      this.controller.fovKick += def.id === 'awp' ? 2.2 : rifle ? 0.55 : def.id === 'deagle' ? 1.2 : 0.35;
+      this.hud.kick(def);
     } else {
       muzzle = c.body.muzzleWorld();
-      if (!def.suppressed) this.effects.muzzle(muzzle, dir);
-      this.effects.tracer(muzzle, hit.point);
+      const barrel = new THREE.Vector3(0, 0, -1).applyQuaternion(c.body.weapon.getWorldQuaternion(new THREE.Quaternion()));
+      if (!def.suppressed) this.effects.muzzle(muzzle, barrel, rifle ? 1 : 0.7);
+      else this.effects.flashLight(muzzle, 0.8, 0.04);
+      if (!def.suppressed) this.effects.tracer(muzzle, hit.point, 600);
+      const ej = c.body.ejectWorld();
+      if (ej && def.id !== 'awp') {
+        const r = new THREE.Vector3(1, 0, 0).applyQuaternion(c.body.weapon.getWorldQuaternion(new THREE.Quaternion()));
+        this.effects.shell(ej, r.multiplyScalar(1.5 + Math.random()).add(new THREE.Vector3(0, 1.6, 0)), rifle);
+      }
       c.body.recoil = 1;
+      c.heat = Math.min(3, (c.heat || 0) + 0.3);
     }
     if (this.audio.ctx) {
       const snd = def.suppressed ? 'usp' : def.sound;
@@ -849,7 +872,13 @@ export class Game {
       if (!b.body) continue;
       b.body.root.position.copy(b.pos);
       const sp = Math.hypot(b.velocity.x, b.velocity.z);
-      b.body.update(dt, sp, b.yaw + b.punch.y, b.pitch + b.punch.x, b.crouch > 0.5, !!(b.brain.target && now - b.brain.lastSeenT < 2));
+      const rdef = WEAPONS[b.weaponId()];
+      const reloadT = b.reloading ? THREE.MathUtils.clamp(1 - (b.reloadEnd - now) / rdef.reload, 0, 1) : null;
+      b.body.update(dt, sp, b.yaw + b.punch.y, b.pitch + b.punch.x, b.crouch > 0.5, !!(b.brain.target && now - b.brain.lastSeenT < 2), reloadT);
+      if (b.heat > 0) {
+        b.heat = Math.max(0, b.heat - dt);
+        if (b.heat > 0.6 && Math.random() < dt * 8 && b.body.weapon) this.effects.barrelSmoke(b.body.muzzleWorld(), b.heat / 3);
+      }
     }
     this.updateGrenades(dt);
     this.updateDrops(dt);
@@ -884,8 +913,12 @@ export class Game {
     const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
     const up = new THREE.Vector3(0, 1, 0).applyQuaternion(cam.quaternion);
     this.audio.updateListener(cam.position, fwd, up);
+    if (this.player.alive && this.vm.smokeT > 0.8 && Math.random() < dt * 10) {
+      this.effects.barrelSmoke(this.camera.localToWorld(this.vm.muzzleCameraSpace()), Math.min(1, this.vm.smokeT / 2.5));
+    }
     const r = this.renderer;
     r.clear();
+    if (window.__vmdbg) { r.render(this.vm.scene, window.__vmdbg); return; }
     r.render(this.scene, cam);
     if (this.controller.firstPerson && this.player.alive) {
       r.clearDepth();

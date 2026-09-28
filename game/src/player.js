@@ -13,6 +13,7 @@ export class PlayerController {
     this.noLock = false;
     this.firstPerson = true;
     this.landKick = 0;
+    this.fovKick = 0;
     this.jumpBuffer = 0;
     this.deathT = 0;
     this.spectating = null;
@@ -260,12 +261,15 @@ export class PlayerController {
       const m = new THREE.Matrix4().lookAt(cam.position, look, new THREE.Vector3(0, 1, 0));
       cam.quaternion.setFromRotationMatrix(m);
     }
-    if (Math.abs(cam.fov - fov) > 0.01) {
-      cam.fov = c.scope ? fov : THREE.MathUtils.lerp(cam.fov, fov, Math.min(1, dt * 20));
+    this.fovKick = Math.max(0, this.fovKick - dt * this.fovKick * 12 - dt);
+    const want = fov + (c.scope ? 0 : this.fovKick);
+    if (Math.abs(cam.fov - want) > 0.01) {
+      cam.fov = c.scope ? want : THREE.MathUtils.lerp(cam.fov, want, Math.min(1, dt * 30));
       cam.updateProjectionMatrix();
     }
     // Viewmodel.
     const sp = Math.hypot(c.velocity.x, c.velocity.z);
+    g.vm.camera.quaternion.copy(cam.quaternion);
     g.vm.update(dt, { mouseDX: this.vmDX, mouseDY: this.vmDY, speed: sp, onGround: c.onGround, crouch: c.crouch, hidden: c.scope > 0, sunDir: g.sunDir });
   }
 }

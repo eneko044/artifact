@@ -1,3 +1,5 @@
+import * as THREE from 'three';
+import { WEAPONS } from './config.js';
 import { Game } from './game.js';
 import { Hud } from './hud.js';
 
@@ -21,6 +23,8 @@ const $ = (s) => document.querySelector(s);
 const hud = new Hud();
 const game = new Game($('#view'), hud, settings);
 window.__game = game;
+window.__THREE = THREE;
+window.__cfg = (id) => WEAPONS[id];
 
 // ---- menu bindings ----
 function bindSegmented(id, key, parse = (v) => v) {

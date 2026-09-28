@@ -177,8 +177,9 @@ export class Hud {
       const def = WEAPONS[p.weaponId()];
       const target = def.mag ? game.inaccuracy(p, def) : 0;
       this.spread += (target - this.spread) * Math.min(1, dt * 14);
+      this.kickGap = Math.max(0, (this.kickGap || 0) - dt * 60);
       const px = (this.spread / Math.tan((game.camera.fov * Math.PI) / 360)) * (innerHeight / 2);
-      e.cross.style.setProperty('--gap', `${Math.min(60, 4 + px)}px`);
+      e.cross.style.setProperty('--gap', `${Math.min(60, 4 + px + (this.kickGap || 0))}px`);
       e.cross.hidden = def.id === 'awp' || !game.controller.firstPerson;
     } else e.cross.hidden = true;
 
@@ -234,6 +235,10 @@ export class Hud {
       n++;
     }
     for (let i = n; i < this.tagPool.length; i++) this.tagPool[i].hidden = true;
+  }
+
+  kick(def) {
+    this.kickGap = Math.min(14, (this.kickGap || 0) + (def.slot === 1 ? 3 : 5));
   }
 
   hitmarker(head, kill) {

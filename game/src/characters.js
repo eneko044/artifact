@@ -1,14 +1,13 @@
 import * as THREE from 'three';
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
+import { reloadPose } from './rigs.js';
 
-const _v1 = new THREE.Vector3();
-const _v2 = new THREE.Vector3();
-const _v3 = new THREE.Vector3();
 const _q1 = new THREE.Quaternion();
 const _q2 = new THREE.Quaternion();
+const _m1 = new THREE.Matrix4();
 const UP = new THREE.Vector3(0, 1, 0);
 
-const TEAM_TINT = {
+export const TEAM_TINT = {
   t: new THREE.Color(0.92, 0.76, 0.55),
   ct: new THREE.Color(0.3, 0.38, 0.55),
 };
@@ -22,25 +21,153 @@ function rotateBoneWorld(bone, qWorld) {
   bone.updateMatrixWorld(true);
 }
 
-// Two-bone CCD toward a target point.
-function solveArm(upper, lower, hand, target, iterations = 10) {
-  const chain = [lower, upper];
-  for (let it = 0; it < iterations; it++) {
-    for (const bone of chain) {
-      bone.getWorldPosition(_v1);
-      hand.getWorldPosition(_v2);
-      const toEff = _v2.sub(_v1).normalize();
-      const toTgt = _v3.copy(target).sub(_v1).normalize();
-      const dot = toEff.dot(toTgt);
-      if (dot > 0.99995) continue;
-      const q = _q1.setFromUnitVectors(toEff, toTgt);
-      // Damp rotations for stability.
-      const damped = new THREE.Quaternion().slerp(q, 0.8);
-      rotateBoneWorld(bone, damped);
+function setBoneWorldQuat(bone, qWorld) {
+  bone.parent.getWorldQuaternion(_q2).invert();
+  bone.quaternion.copy(_q2.multiply(qWorld));
+  bone.updateMatrixWorld(true);
+}
+
+// Aim a bone so the direction to its child joint points at `target` (minimal rotation).
+function aimBone(bone, childPos, target) {
+  const origin = bone.getWorldPosition(new THREE.Vector3());
+  const from = childPos.clone().sub(origin).normalize();
+  const to = target.clone().sub(origin).normalize();
+  if (from.dot(to) > 0.999999) return;
+  rotateBoneWorld(bone, new THREE.Quaternion().setFromUnitVectors(from, to));
+}
+
+// Analytic two-bone IK with a pole direction for the elbow.
+function solveArm(upper, lower, hand, target, pole) {
+  const S = upper.getWorldPosition(new THREE.Vector3());
+  const E0 = lower.getWorldPosition(new THREE.Vector3());
+  const W0 = hand.getWorldPosition(new THREE.Vector3());
+  const L1 = S.distanceTo(E0), L2 = E0.distanceTo(W0);
+  const toT = target.clone().sub(S);
+  let d = toT.length();
+  if (d < 1e-5) return;
+  const dir = toT.divideScalar(d);
+  d = Math.min(d, (L1 + L2) * 0.999);
+  const a = (L1 * L1 - L2 * L2 + d * d) / (2 * d);
+  const h = Math.sqrt(Math.max(0, L1 * L1 - a * a));
+  const p = pole.clone().addScaledVector(dir, -pole.dot(dir));
+  if (p.lengthSq() < 1e-8) p.set(0, -1, 0);
+  p.normalize();
+  const E = S.clone().addScaledVector(dir, a).addScaledVector(p, h);
+  aimBone(upper, E0, E);
+  const W1 = hand.getWorldPosition(new THREE.Vector3());
+  aimBone(lower, W1, S.clone().addScaledVector(dir, d));
+}
+
+const FINGERS = ['Index', 'Middle', 'Ring', 'Pinky'];
+
+// Knows each hand's local axes (from the finger joints) so a palm can be pointed at a grip,
+// and curls the fingers around it.
+export class HandRig {
+  constructor(bones) {
+    this.hands = {};
+    for (const side of ['Right', 'Left']) {
+      const hand = bones[`${side}Hand`];
+      const f = bones[`${side}HandMiddle1`].position.clone().normalize();
+      const th = bones[`${side}HandThumb1`].position.clone().normalize();
+      const palm = side === 'Right' ? th.clone().cross(f) : f.clone().cross(th);
+      const n = palm.addScaledVector(f, -palm.dot(f)).normalize();
+      const b = f.clone().cross(n);
+      const local = new THREE.Matrix4().makeBasis(f, n, b);
+      const chains = FINGERS.map((name) => [1, 2, 3].map((i) => bones[`${side}Hand${name}${i}`]).filter(Boolean));
+      const thumb = [1, 2, 3].map((i) => bones[`${side}HandThumb${i}`]).filter(Boolean);
+      const rest = [...chains.flat(), ...thumb].map((b) => [b, b.quaternion.clone()]);
+      this.hands[side] = { hand, localInv: local.clone().invert(), chains, thumb, rest };
     }
-    hand.getWorldPosition(_v2);
-    if (_v2.distanceToSquared(target) < 1e-5) break;
   }
+
+  // F: knuckle direction, N: palm normal (world). curls: per finger [index, middle, ring, pinky].
+  orient(side, F, N, curls, thumbCurl = 0.3) {
+    const h = this.hands[side];
+    // Start the fingers from their rest pose so curls never accumulate between frames.
+    for (const [b, q] of h.rest) b.quaternion.copy(q);
+    const f = F.clone().normalize();
+    const n = N.clone().addScaledVector(f, -N.dot(f)).normalize();
+    const b = f.clone().cross(n);
+    _m1.makeBasis(f, n, b).multiply(h.localInv);
+    setBoneWorldQuat(h.hand, new THREE.Quaternion().setFromRotationMatrix(_m1));
+    // Curling about the knuckle axis moves fingertips toward the palm.
+    h.chains.forEach((chain, i) => {
+      const c = curls[i] ?? curls[curls.length - 1];
+      chain.forEach((bone, j) => rotateBoneWorld(bone, new THREE.Quaternion().setFromAxisAngle(b, c * (j === 0 ? 0.9 : j === 1 ? 1.1 : 0.7))));
+    });
+    if (h.thumb.length && thumbCurl) {
+      const axis = f.clone().addScaledVector(n, 0.5).normalize();
+      h.thumb.forEach((bone) => rotateBoneWorld(bone, new THREE.Quaternion().setFromAxisAngle(axis, thumbCurl * (side === 'Right' ? -1 : 1))));
+    }
+  }
+}
+
+// Puts both hands on a weapon (optionally mid-reload). Shared by bots and first-person arms.
+export function gripWeapon(B, handRig, weapon, reload, poleR, poleL, leftIdle) {
+  const rig = weapon.userData.rig;
+  const W = weapon.matrixWorld;
+  const wq = weapon.getWorldQuaternion(new THREE.Quaternion());
+  const toWorldDir = (v) => v.clone().applyQuaternion(wq);
+  const toWorld = (v) => v.clone().applyMatrix4(W);
+  // The wrist sits behind the palm: back along the knuckles and away from the grip.
+  const rF = toWorldDir(rig.rightF), rN = toWorldDir(rig.rightN);
+  const rightWrist = toWorld(rig.grip).addScaledVector(rF, -0.055).addScaledVector(rN, -0.03);
+  solveArm(B.RightArm, B.RightForeArm, B.RightHand, rightWrist, poleR);
+  const fist = rig.kind === 'knife' || rig.kind === 'nade';
+  handRig.orient('Right', rF, rN, [fist ? 1.25 : 0.35, 1.3, 1.35, 1.35], fist ? 0.6 : 0.35);
+
+  if (!rig.support) {
+    if (leftIdle) solveArm(B.LeftArm, B.LeftForeArm, B.LeftHand, leftIdle.pos, poleL);
+    return;
+  }
+  let lp = rig.support, lF = rig.leftF, lN = rig.leftN, curl = rig.kind === 'pistol' ? 1.1 : 0.85;
+  if (reload && reload.active) {
+    lp = reload.pose.left;
+    const k = reload.pose.leftBlend || 0;
+    lF = rig.leftF.clone().lerp(rig.grabF, k).normalize();
+    lN = rig.leftN.clone().lerp(rig.grabN, k).normalize();
+    curl = THREE.MathUtils.lerp(curl, 1.15, k);
+  }
+  const F = toWorldDir(lF), N = toWorldDir(lN);
+  const leftWrist = toWorld(lp).addScaledVector(F, -0.06).addScaledVector(N, -0.032);
+  solveArm(B.LeftArm, B.LeftForeArm, B.LeftHand, leftWrist, poleL);
+  handRig.orient('Left', F, N, [curl, curl, curl * 1.05, curl * 1.1], 0.25);
+}
+
+// Magazine animation. Returns true on the frame the old magazine is released.
+export function updateMagazine(weapon, pose, active, dt) {
+  const mag = weapon.userData.mag;
+  if (!mag) return false;
+  const rest = weapon.userData.magRest;
+  const rig = weapon.userData.rig;
+  const st = weapon.userData.magState || (weapon.userData.magState = { prev: 'rest', vel: new THREE.Vector3() });
+  const state = active ? pose.mag : 'rest';
+  let released = false;
+  if (state === 'rest') {
+    mag.visible = true;
+    mag.position.copy(rest.pos);
+    mag.quaternion.copy(rest.quat);
+  } else if (state === 'hand') {
+    mag.visible = true;
+    mag.position.copy(rest.pos).add(pose.left).sub(rig.magGrab);
+    mag.quaternion.copy(rest.quat);
+    mag.rotateZ((1 - (pose.leftBlend ?? 1)) * 0.2);
+  } else if (state === 'eject') {
+    mag.visible = true;
+    mag.position.copy(rest.pos).addScaledVector(rig.magAxis, 0.11 * pose.magEject);
+    mag.quaternion.copy(rest.quat);
+  } else if (state === 'drop') {
+    if (st.prev !== 'drop') { released = true; st.vel.set(-0.15, -0.5, 0.1); }
+    st.vel.y -= 9.8 * dt;
+    mag.position.addScaledVector(st.vel, dt);
+    mag.rotateX(dt * 3);
+    mag.visible = mag.position.y > -0.8;
+  } else if (state === 'hidden') {
+    if (st.prev === 'eject') released = true;
+    mag.visible = false;
+  }
+  st.prev = state;
+  return released;
 }
 
 export class SoldierBody {
@@ -66,17 +193,18 @@ export class SoldierBody {
     this.actions = {};
     for (const clip of assets.soldier.animations) this.actions[clip.name] = this.mixer.clipAction(clip);
     for (const n of ['Idle', 'Walk', 'Run']) { this.actions[n].play(); this.actions[n].setEffectiveWeight(n === 'Idle' ? 1 : 0); }
+    this.hands = new HandRig(this.bones);
     this.weapon = null;
     this.weaponId = null;
     this.dead = false;
     this.deathT = 0;
-    this.fallDir = 1;
     this.recoil = 0;
     this.crouch = 0;
     this.aimYaw = 0;
     this.aimPitch = 0;
     this.aiming = 0; // 0 lowered .. 1 shouldered
-    this.phase = Math.random();
+    this.reload = { active: false, t: 0, pose: {} };
+    this.onMagDrop = null;
   }
 
   setWeapon(model, id, slot) {
@@ -87,16 +215,17 @@ export class SoldierBody {
     if (model) this.root.add(model);
   }
 
-  // speed in m/s, yaw/pitch of aim in world space.
-  update(dt, speed, yaw, pitch, crouch, aiming) {
+  // speed in m/s, yaw/pitch of aim in world space, reload progress 0..1 or null.
+  update(dt, speed, yaw, pitch, crouch, aiming, reloadT = null) {
     if (this.dead) { this.updateDeath(dt); return; }
     this.aimYaw = yaw;
     this.aimPitch = pitch;
     this.aiming += ((aiming ? 1 : 0) - this.aiming) * Math.min(1, dt * 8);
     this.crouch += ((crouch ? 1 : 0) - this.crouch) * Math.min(1, dt * 10);
     this.recoil = Math.max(0, this.recoil - dt * 8);
+    this.reload.active = reloadT !== null;
+    this.reload.t = reloadT ?? 0;
 
-    // Locomotion blend.
     const wWalk = THREE.MathUtils.clamp(speed / 2.2, 0, 1) * (1 - THREE.MathUtils.clamp((speed - 3.2) / 2, 0, 1));
     const wRun = THREE.MathUtils.clamp((speed - 3.2) / 2, 0, 1);
     const wIdle = Math.max(0, 1 - wWalk - wRun);
@@ -110,16 +239,17 @@ export class SoldierBody {
     // Body faces the aim direction (the model looks down -Z by default).
     this.root.rotation.y = yaw;
     this.root.updateMatrixWorld(true);
-    this.applyPose();
+    this.applyPose(dt);
   }
 
-  applyPose() {
+  applyPose(dt) {
     const B = this.bones;
-    const right = _v1.set(1, 0, 0).applyAxisAngle(UP, this.root.rotation.y).clone();
-    // Crouch: sink hips and bend legs.
+    const yawQ = new THREE.Quaternion().setFromAxisAngle(UP, this.root.rotation.y);
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(yawQ);
     if (this.crouch > 0.01) {
       const c = this.crouch;
       B.Hips.position.y -= 38 * c; // model units are cm
+      B.Hips.updateMatrixWorld(true);
       rotateBoneWorld(B.LeftUpLeg, new THREE.Quaternion().setFromAxisAngle(right, -1.1 * c));
       rotateBoneWorld(B.RightUpLeg, new THREE.Quaternion().setFromAxisAngle(right, -1.1 * c));
       rotateBoneWorld(B.LeftLeg, new THREE.Quaternion().setFromAxisAngle(right, 1.9 * c));
@@ -127,51 +257,68 @@ export class SoldierBody {
       rotateBoneWorld(B.LeftFoot, new THREE.Quaternion().setFromAxisAngle(right, -0.7 * c));
       rotateBoneWorld(B.RightFoot, new THREE.Quaternion().setFromAxisAngle(right, -0.7 * c));
     }
-    // Pitch spread over the spine, plus a little twist so the rifle sits on the right shoulder.
-    const pitch = THREE.MathUtils.lerp(-0.35, this.aimPitch, this.aiming);
+    const reloading = this.reload.active;
+    const aim = reloading ? Math.min(this.aiming, 0.35) : this.aiming;
+    const pitch = THREE.MathUtils.lerp(-0.42, this.aimPitch, aim);
+    const long = this.weaponSlot === 1;
     const qp = new THREE.Quaternion().setFromAxisAngle(right, -pitch / 3);
-    const twist = new THREE.Quaternion().setFromAxisAngle(UP, (this.weaponSlot === 1 ? 0.35 : 0.12) * (0.4 + this.aiming * 0.6));
+    const twist = new THREE.Quaternion().setFromAxisAngle(UP, (long ? 0.38 : 0.12) * (0.5 + aim * 0.5));
     for (const n of ['Spine', 'Spine1', 'Spine2']) {
       rotateBoneWorld(B[n], qp);
       rotateBoneWorld(B[n], new THREE.Quaternion().slerp(twist, 1 / 3));
     }
-    // Keep the head level-ish, looking at the target.
-    rotateBoneWorld(B.Neck, new THREE.Quaternion().setFromAxisAngle(UP, -0.25 * this.aiming));
+    rotateBoneWorld(B.Neck, new THREE.Quaternion().setFromAxisAngle(UP, -0.3 * aim * (long ? 1 : 0.4)));
 
     if (!this.weapon) return;
-    // Place the weapon in front of the chest along the aim.
-    const chest = B.Spine2.getWorldPosition(new THREE.Vector3());
     const yaw = this.aimYaw;
     const fwd = new THREE.Vector3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
     const r = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
     const up = new THREE.Vector3().crossVectors(r, fwd);
-    const long = this.weaponSlot === 1;
-    const knife = this.weaponId === 'knife';
-    const gp = chest.clone()
-      .addScaledVector(r, long ? 0.16 : 0.1)
-      .addScaledVector(up, long ? 0.08 : 0.12)
-      .addScaledVector(fwd, (long ? 0.2 : 0.38) - this.recoil * 0.05);
-    if (knife) gp.addScaledVector(up, -0.35).addScaledVector(r, 0.12);
+    const ud = this.weapon.userData;
+    const rig = ud.rig;
+    const shoulder = B.RightArm.getWorldPosition(new THREE.Vector3());
+    const chest = B.Spine2.getWorldPosition(new THREE.Vector3());
+    let gp;
+    if (rig.kind === 'rifle' || rig.kind === 'bolt') {
+      // Stock butt in the shoulder pocket, grip below the bore.
+      gp = shoulder.clone().addScaledVector(r, -0.05).addScaledVector(fwd, ud.rear + 0.01).addScaledVector(up, -0.07);
+    } else if (rig.kind === 'pistol') {
+      gp = chest.clone().addScaledVector(r, 0.02).addScaledVector(up, 0.14).addScaledVector(fwd, 0.44);
+    } else {
+      gp = chest.clone().addScaledVector(r, 0.2).addScaledVector(up, -0.28).addScaledVector(fwd, 0.36);
+    }
+    gp.addScaledVector(fwd, -this.recoil * 0.04);
+    // Reload: roll the gun toward the support hand and lift it a touch.
+    let rp = null;
+    if (reloading && rig.support) {
+      rp = reloadPose(rig, this.reload.t, this.reload.pose);
+      gp.addScaledVector(up, rp.tilt.y).addScaledVector(r, -0.06 * rp.tilt.z);
+    }
     this.weapon.position.copy(this.root.worldToLocal(gp.clone()));
     const m = new THREE.Matrix4().makeBasis(r, up, fwd.clone().negate());
     const qw = new THREE.Quaternion().setFromRotationMatrix(m);
     const rootQ = this.root.getWorldQuaternion(new THREE.Quaternion()).invert();
     this.weapon.quaternion.copy(rootQ.multiply(qw));
     if (this.recoil > 0) this.weapon.rotateX(this.recoil * 0.12);
+    if (rp) { this.weapon.rotateZ(rp.tilt.z); this.weapon.rotateX(rp.tilt.x); }
     this.weapon.updateMatrixWorld(true);
+    if (updateMagazine(this.weapon, rp || {}, !!rp, dt) && this.onMagDrop) this.onMagDrop(ud.mag);
 
-    // Hands to the weapon.
-    solveArm(B.RightArm, B.RightForeArm, B.RightHand, gp);
-    if (!knife) {
-      const support = gp.clone().addScaledVector(fwd, long ? Math.abs(this.weapon.userData.front) * 0.55 : 0.02)
-        .addScaledVector(up, long ? -0.03 : -0.02).addScaledVector(r, long ? 0 : -0.05);
-      solveArm(B.LeftArm, B.LeftForeArm, B.LeftHand, support);
-    }
+    const down = new THREE.Vector3(0, -1, 0);
+    const poleR = down.clone().addScaledVector(r, 0.9).addScaledVector(fwd, -0.3);
+    const poleL = down.clone().addScaledVector(r, -0.5).addScaledVector(fwd, -0.2);
+    const leftIdle = { pos: chest.clone().addScaledVector(r, -0.28).addScaledVector(up, -0.45).addScaledVector(fwd, 0.1) };
+    gripWeapon(B, this.hands, this.weapon, rp ? { active: true, pose: rp } : null, poleR, poleL, leftIdle);
   }
 
   muzzleWorld(out = new THREE.Vector3()) {
     if (!this.weapon) return this.headWorld(out);
     return out.copy(this.weapon.userData.muzzle || new THREE.Vector3()).applyMatrix4(this.weapon.matrixWorld);
+  }
+
+  ejectWorld(out = new THREE.Vector3()) {
+    if (!this.weapon || !this.weapon.userData.eject) return null;
+    return out.copy(this.weapon.userData.eject).applyMatrix4(this.weapon.matrixWorld);
   }
 
   headWorld(out = new THREE.Vector3()) {
@@ -199,13 +346,11 @@ export class SoldierBody {
   die(fromDir, headshot) {
     this.dead = true;
     this.deathT = 0;
-    // Fall away from the shot.
     const localDir = fromDir.clone().applyQuaternion(this.root.quaternion.clone().invert());
     this.fallAxis = new THREE.Vector3(localDir.z, 0, -localDir.x).normalize();
     if (this.fallAxis.lengthSq() < 0.1) this.fallAxis.set(1, 0, 0);
     this.fallDur = headshot ? 0.45 : 0.7;
     this.startQ = this.model.quaternion.clone();
-    this.knees = 0;
   }
 
   updateDeath(dt) {
@@ -216,16 +361,65 @@ export class SoldierBody {
     const q = new THREE.Quaternion().setFromAxisAngle(this.fallAxis, e * Math.PI / 2 * 0.97);
     this.model.quaternion.copy(this.startQ).premultiply(q);
     this.model.position.y = e * 0.12;
-    if (t >= 1 && !this.settled) {
-      this.settled = true; // freeze on the last pose (stopping actions would snap to bind pose)
-    }
+    if (t >= 1) this.settled = true; // freeze on the last pose
     this.root.updateMatrixWorld(true);
-    // Limp arms / knees for the final pose.
+  }
+}
+
+// First-person arms: the same soldier with the head hidden and the eyes at the camera.
+export class FirstPersonArms {
+  constructor(assets, team) {
+    const model = cloneSkinned(assets.soldier.scene);
+    this.model = model;
+    model.traverse((o) => {
+      if (o.isMesh) {
+        o.frustumCulled = false;
+        o.castShadow = false;
+        o.material = o.material.clone();
+        o.material.color.copy(TEAM_TINT[team]).multiplyScalar(0.72);
+        o.material.envMapIntensity = 0.6;
+      }
+    });
+    this.root = new THREE.Group();
+    this.root.add(model);
+    this.bones = {};
+    model.traverse((o) => { if (o.isBone) this.bones[o.name.replace('mixamorig', '')] = o; });
+    this.mixer = new THREE.AnimationMixer(model);
+    const idle = assets.soldier.animations.find((a) => a.name === 'Idle');
+    this.action = this.mixer.clipAction(idle);
+    this.action.play();
+    this.mixer.update(0.5);
+    this.root.updateMatrixWorld(true);
+    this.hands = new HandRig(this.bones);
+    // Eyes at the origin; the body sits a little forward so the arms reach the gun.
+    const head = this.bones.Head.getWorldPosition(new THREE.Vector3());
+    this.eyeOffset = head.clone().add(new THREE.Vector3(0, 0.07, -0.07));
+    this.forward = 0.1;
+    // Lower the shoulders a little so they stay out of the view.
+    this.root.position.set(-this.eyeOffset.x, -this.eyeOffset.y - 0.09, -this.eyeOffset.z - this.forward);
+    this.reload = { active: false, t: 0, pose: {} };
+  }
+
+  pose(dt, weapon, reloadT) {
     const B = this.bones;
-    const k = Math.min(1, this.deathT / 0.5);
-    if (!this.settled) {
-      B.LeftLeg.rotation.x += 0.02 * k;
-      B.RightLeg.rotation.x += 0.03 * k;
-    }
+    this.mixer.update(dt * 0.4);
+    // Hide the head and legs by collapsing them onto their joints.
+    for (const n of ['Head', 'Neck', 'LeftUpLeg', 'RightUpLeg']) B[n].scale.setScalar(0.001);
+    this.root.updateMatrixWorld(true);
+    if (!weapon) return null;
+    const rig = weapon.userData.rig;
+    const cam = this.root.parent;
+    const camQ = cam.getWorldQuaternion(new THREE.Quaternion());
+    const r = new THREE.Vector3(1, 0, 0).applyQuaternion(camQ);
+    const d = new THREE.Vector3(0, -1, 0).applyQuaternion(camQ);
+    const f = new THREE.Vector3(0, 0, -1).applyQuaternion(camQ);
+    const poleR = d.clone().addScaledVector(r, 0.8).addScaledVector(f, -0.2);
+    const poleL = d.clone().addScaledVector(r, -0.35).addScaledVector(f, -0.2);
+    let rp = null;
+    if (reloadT !== null && rig.support) rp = reloadPose(rig, reloadT, this.reload.pose);
+    const camPos = cam.getWorldPosition(new THREE.Vector3());
+    const leftIdle = { pos: camPos.clone().addScaledVector(r, -0.3).addScaledVector(d, 0.7).addScaledVector(f, 0.05) };
+    gripWeapon(B, this.hands, weapon, rp ? { active: true, pose: rp } : null, poleR, poleL, leftIdle);
+    return rp;
   }
 }

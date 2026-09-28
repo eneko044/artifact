@@ -3,6 +3,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { WEAPONS } from './config.js';
+import { buildRig } from './rigs.js';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 
 export const TEXTURE_SETS = {
   sandstone: { name: 'large_sandstone_blocks_01', scale: 3.2 },
@@ -164,7 +166,7 @@ export class Assets {
 
   // Returns a new Object3D of a weapon model, normalised so its barrel points down -Z,
   // its length equals def.model.length, and its origin sits at the grip.
-  weaponModel(id) {
+  weaponModel(id, opts = {}) {
     const def = WEAPONS[id];
     let src;
     if (def.model.kind === 'fbx') src = this.guns[def.model.src];
@@ -187,17 +189,107 @@ export class Assets {
     const c = box.getCenter(new THREE.Vector3());
     const len = box.max.z - box.min.z;
     const h = box.max.y - box.min.y;
-    // Grip point sits toward the rear, a little below the bore line.
-    const gripZ = box.max.z - len * (def.slot === 1 ? 0.34 : 0.62);
-    const gripY = box.min.y + h * (def.slot === 1 ? 0.55 : 0.6);
-    if (id === 'knife' || id === 'he') spin.position.sub(c);
-    else spin.position.sub(new THREE.Vector3(c.x, gripY, gripZ));
-    holder.userData.muzzle = new THREE.Vector3(0, box.max.y - gripY - h * (def.slot === 1 ? 0.3 : 0.2), box.min.z - gripZ);
+    if (opts.measure) { spin.position.sub(c); holder.updateMatrixWorld(true); return holder; }
+    // Origin at the measured right-hand grip.
+    const rig = buildRig(id);
+    spin.position.sub(c).sub(rig.gripOffset);
+    holder.updateMatrixWorld(true);
+    const g = rig.gripOffset;
+    holder.userData.rig = rig;
+    holder.userData.muzzle = rig.muzzle ? rig.muzzle.clone() : new THREE.Vector3(0, 0.02, box.min.z - c.z - g.z);
+    holder.userData.eject = rig.eject ? rig.eject.clone() : null;
     holder.userData.length = len;
     holder.userData.height = h;
-    holder.userData.front = box.min.z - gripZ; // negative
-    holder.userData.rear = box.max.z - gripZ;
+    holder.userData.front = box.min.z - c.z - g.z; // negative
+    holder.userData.rear = box.max.z - c.z - g.z;
+    // Magazine as its own object so reloads can pull it out.
+    if (rig.magCut) this.splitMagazine(id, holder, rig);
+    else if (rig.procMag) this.addProceduralMag(holder, rig);
     holder.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
     return holder;
+  }
+
+  // Cut the magazine triangles out of the gun mesh (inside a capsule around its axis).
+  splitMagazine(id, holder, rig) {
+    let mesh = null;
+    holder.traverse((o) => { if (o.isMesh && !mesh) mesh = o; });
+    if (!mesh) return;
+    this.magCache = this.magCache || {};
+    let cached = this.magCache[id];
+    if (!cached) {
+      const src = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry;
+      const M = new THREE.Matrix4().copy(holder.matrixWorld).invert().multiply(mesh.matrixWorld);
+      const nM = new THREE.Matrix3().getNormalMatrix(M);
+      const A = rig.magCut.a.clone().sub(rig.gripOffset), B = rig.magCut.b.clone().sub(rig.gripOffset);
+      const AB = B.clone().sub(A);
+      const L = AB.length();
+      AB.divideScalar(L);
+      const pos = src.attributes.position;
+      const tri = pos.count / 3;
+      const matOf = new Int32Array(tri);
+      if (src.groups.length) for (const gr of src.groups) for (let t = gr.start / 3; t < (gr.start + gr.count) / 3; t++) matOf[t] = gr.materialIndex;
+      const inMag = new Uint8Array(tri);
+      const p = new THREE.Vector3(), q = new THREE.Vector3();
+      for (let t = 0; t < tri; t++) {
+        p.set(0, 0, 0);
+        for (let k = 0; k < 3; k++) p.add(q.fromBufferAttribute(pos, t * 3 + k));
+        p.multiplyScalar(1 / 3).applyMatrix4(M);
+        const d = p.clone().sub(A);
+        const along = d.dot(AB) / L;
+        const perp = d.addScaledVector(AB, -along * L);
+        if (along > -0.01 && along < 1.1 && Math.hypot(perp.y, perp.z) < rig.magCut.r && Math.abs(p.x) < 0.05) inMag[t] = 1;
+      }
+      const build = (want, bake) => {
+        const order = [];
+        for (let t = 0; t < tri; t++) if (inMag[t] === want) order.push(t);
+        order.sort((a, b) => matOf[a] - matOf[b]);
+        const g = new THREE.BufferGeometry();
+        for (const name of Object.keys(src.attributes)) {
+          const a = src.attributes[name];
+          const arr = new Float32Array(order.length * 3 * a.itemSize);
+          order.forEach((t, i) => { for (let k = 0; k < 3; k++) for (let c = 0; c < a.itemSize; c++) arr[(i * 3 + k) * a.itemSize + c] = a.getComponent(t * 3 + k, c); });
+          g.setAttribute(name, new THREE.BufferAttribute(arr, a.itemSize));
+        }
+        let start = 0;
+        for (let i = 1; i <= order.length; i++) {
+          if (i === order.length || matOf[order[i]] !== matOf[order[start]]) { g.addGroup(start * 3, (i - start) * 3, matOf[order[start]]); start = i; }
+        }
+        if (bake) {
+          g.applyMatrix4(M);
+          if (g.attributes.normal) g.attributes.normal.applyNormalMatrix(nM);
+        }
+        return g;
+      };
+      cached = this.magCache[id] = { keep: build(0, false), mag: build(1, true) };
+    }
+    mesh.geometry = cached.keep;
+    const mag = new THREE.Mesh(cached.mag, mesh.material);
+    mag.castShadow = true;
+    holder.add(mag);
+    holder.userData.mag = mag;
+    holder.userData.magRest = { pos: mag.position.clone(), quat: mag.quaternion.clone() };
+  }
+
+  // Pistols and the AWP get a real magazine that lives inside the grip / stock.
+  addProceduralMag(holder, rig) {
+    if (!this.magMats) {
+      this.magMats = {
+        body: new THREE.MeshStandardMaterial({ color: 0x1f2124, roughness: 0.45, metalness: 0.7, envMapIntensity: 0.4 }),
+        brass: new THREE.MeshStandardMaterial({ color: 0xc9a456, roughness: 0.3, metalness: 1, envMapIntensity: 0.6 }),
+      };
+    }
+    const [sx, sy, sz] = rig.procMag.size;
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(new RoundedBoxGeometry(sx, sy, sz, 2, Math.min(sx, sz) * 0.2), this.magMats.body);
+    g.add(body);
+    const top = new THREE.Mesh(new THREE.CylinderGeometry(sx * 0.32, sx * 0.32, sz * 0.8, 10), this.magMats.brass);
+    top.rotation.x = Math.PI / 2;
+    top.position.y = sy / 2 + sx * 0.2;
+    g.add(top);
+    g.position.copy(rig.procMag.pos);
+    g.rotation.x = -rig.procMag.angle;
+    holder.add(g);
+    holder.userData.mag = g;
+    holder.userData.magRest = { pos: g.position.clone(), quat: g.quaternion.clone() };
   }
 }
