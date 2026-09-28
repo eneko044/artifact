@@ -15,10 +15,16 @@ assets.load().then(() => {
   m.traverse((o) => { if (o.isMesh) { const mats = Array.isArray(o.material) ? o.material : [o.material]; mats.forEach((x) => { x.metalness = 0; x.color.offsetHSL(0, 0, 0.25); }); } });
   scene.add(m);
   const box = new THREE.Box3().setFromObject(m);
-  const halfW = Math.max(box.max.z, -box.min.z) + 0.03;
+  const zoomTop = new URLSearchParams(location.search).get('top');
+  let halfW = Math.max(box.max.z, -box.min.z) + 0.03;
+  let halfH = halfW * H / W;
+  const needH = Math.max(box.max.y, -box.min.y) + 0.02;
+  if (needH > halfH) { halfH = needH; halfW = halfH * W / H; }
+  let cy = 0;
+  if (zoomTop) { halfW /= 1.6; halfH /= 1.6; cy = box.max.y - halfH * 0.55; }
   const span = halfW * 2;
-  const halfH = span * H / W / 2;
-  const cam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, -5, 5);
+  const zc = zoomTop ? parseFloat(zoomTop) / 100 : 0;
+  const cam = new THREE.OrthographicCamera(-halfW + zc, halfW + zc, halfH + cy, -halfH + cy, -5, 5);
   cam.position.set(1, 0, 0); cam.lookAt(0, 0, 0);
   renderer.render(scene, cam);
   // grid overlay: screen x = -z, screen y = y (cm labels)
@@ -26,7 +32,7 @@ assets.load().then(() => {
   c2.style.position = 'absolute'; c2.style.left = '0'; c2.style.top = '0';
   document.body.appendChild(c2);
   const ctx = c2.getContext('2d');
-  const px = (sx) => (sx + halfW) / span * W, py = (sy) => (halfH - sy) / (2 * halfH) * H;
+  const px = (sx) => (sx + halfW - zc) / span * W, py = (sy) => (halfH + cy - sy) / (2 * halfH) * H;
   ctx.font = '11px sans-serif';
   for (let cm = -100; cm <= 100; cm++) {
     const v = cm / 100;

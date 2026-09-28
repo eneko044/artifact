@@ -180,7 +180,7 @@ export class Hud {
       this.kickGap = Math.max(0, (this.kickGap || 0) - dt * 60);
       const px = (this.spread / Math.tan((game.camera.fov * Math.PI) / 360)) * (innerHeight / 2);
       e.cross.style.setProperty('--gap', `${Math.min(60, 4 + px + (this.kickGap || 0))}px`);
-      e.cross.hidden = def.id === 'awp' || !game.controller.firstPerson;
+      e.cross.hidden = def.id === 'awp' || !game.controller.firstPerson || game.vm.ads > 0.35;
     } else e.cross.hidden = true;
 
     this.hitT = Math.max(0, this.hitT - dt);
@@ -193,6 +193,9 @@ export class Hud {
     if (this.toastT <= 0) e.toast.classList.remove('show');
     // Low health pulse.
     e.vignette.style.opacity = p.alive ? Math.max(0, (40 - p.hp) / 40) * 0.8 : 0;
+    // Aiming down the sights narrows the world a little around the edges.
+    this.adsEl = this.adsEl || document.querySelector('#ads-vignette');
+    if (this.adsEl) this.adsEl.style.opacity = p.alive ? (game.vm.ads * 0.85).toFixed(3) : 0;
     // Kill feed expiry.
     this.feedItems = this.feedItems.filter((it) => {
       it.t -= dt;

@@ -60,6 +60,18 @@ function solveArm(upper, lower, hand, target, pole) {
 
 const FINGERS = ['Index', 'Middle', 'Ring', 'Pinky'];
 
+function angDiff(a, b) {
+  let d = b - a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+function smoothstep(a, b, x) {
+  const t = THREE.MathUtils.clamp((x - a) / (b - a), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
 // Knows each hand's local axes (from the finger joints) so a palm can be pointed at a grip,
 // and curls the fingers around it.
 export class HandRig {
@@ -215,8 +227,9 @@ export class SoldierBody {
     if (model) this.root.add(model);
   }
 
-  // speed in m/s, yaw/pitch of aim in world space, reload progress 0..1 or null.
-  update(dt, speed, yaw, pitch, crouch, aiming, reloadT = null) {
+  // vel: world velocity (or a plain speed), yaw/pitch of aim in world space,
+  // reload progress 0..1 or null.
+  update(dt, vel, yaw, pitch, crouch, aiming, reloadT = null) {
     if (this.dead) { this.updateDeath(dt); return; }
     this.aimYaw = yaw;
     this.aimPitch = pitch;
@@ -225,27 +238,68 @@ export class SoldierBody {
     this.recoil = Math.max(0, this.recoil - dt * 8);
     this.reload.active = reloadT !== null;
     this.reload.t = reloadT ?? 0;
+    const speed = typeof vel === 'number' ? vel : Math.hypot(vel.x, vel.z);
+
+    // Legs go where the soldier walks, the torso twists toward where he aims.
+    // Moving away from the aim uses the walk cycle played backwards.
+    if (this.bodyYaw === undefined) this.bodyYaw = yaw;
+    let target = this.bodyYaw;
+    let backward = false;
+    if (typeof vel !== 'number' && speed > 0.45) {
+      const moveYaw = Math.atan2(-vel.x, -vel.z);
+      const d = angDiff(yaw, moveYaw);
+      target = Math.abs(d) <= 1.95 ? moveYaw : moveYaw + Math.PI;
+      backward = Math.abs(d) > 1.95;
+      const tw = angDiff(target, yaw);
+      if (Math.abs(tw) > 1.15) target = yaw - Math.sign(tw) * 1.15;
+    } else if (Math.abs(angDiff(this.bodyYaw, yaw)) > 0.55) {
+      target = yaw; // shuffle the feet round when the twist gets uncomfortable
+    }
+    const turn = (speed > 0.45 ? 7 : 5) * dt;
+    this.bodyYaw += THREE.MathUtils.clamp(angDiff(this.bodyYaw, target), -turn, turn);
+    const turning = Math.abs(angDiff(this.bodyYaw, target)) > 0.05 && speed <= 0.45;
 
     const wWalk = THREE.MathUtils.clamp(speed / 2.2, 0, 1) * (1 - THREE.MathUtils.clamp((speed - 3.2) / 2, 0, 1));
     const wRun = THREE.MathUtils.clamp((speed - 3.2) / 2, 0, 1);
-    const wIdle = Math.max(0, 1 - wWalk - wRun);
+    const wShuffle = turning ? 0.35 : 0;
+    const wIdle = Math.max(0, 1 - wWalk - wRun - wShuffle);
     this.actions.Idle.setEffectiveWeight(wIdle);
-    this.actions.Walk.setEffectiveWeight(wWalk);
+    this.actions.Walk.setEffectiveWeight(wWalk + wShuffle);
     this.actions.Run.setEffectiveWeight(wRun);
-    this.actions.Walk.timeScale = THREE.MathUtils.clamp(speed / 1.6, 0.6, 1.6);
-    this.actions.Run.timeScale = THREE.MathUtils.clamp(speed / 5.2, 0.8, 1.3);
+    const dir = backward ? -1 : 1;
+    this.actions.Walk.timeScale = dir * (turning && speed < 0.45 ? 0.8 : THREE.MathUtils.clamp(speed / 1.6, 0.6, 1.6)) * (this.crouch > 0.5 ? 0.8 : 1);
+    this.actions.Run.timeScale = dir * THREE.MathUtils.clamp(speed / 5.2, 0.8, 1.3);
     this.mixer.update(dt);
 
-    // Body faces the aim direction (the model looks down -Z by default).
-    this.root.rotation.y = yaw;
+    this.root.rotation.y = this.bodyYaw;
     this.root.updateMatrixWorld(true);
     this.applyPose(dt);
   }
 
+  // A bullet impact: the torso snaps away from the shot and recovers.
+  flinch(dir, head) {
+    if (this.dead) return;
+    const d = dir.clone().setY(0).normalize();
+    this.flinchAxis = new THREE.Vector3(d.z, 0, -d.x).normalize();
+    this.flinchV = (this.flinchV || 0) + (head ? 5 : 3.2);
+    this.flinchHead = head;
+  }
+
   applyPose(dt) {
     const B = this.bones;
+    // Hit reaction spring.
+    this.flinchA = this.flinchA || 0;
+    this.flinchV = this.flinchV || 0;
+    this.flinchV += (-this.flinchA * 220 - this.flinchV * 18) * dt;
+    this.flinchA += this.flinchV * dt;
     const yawQ = new THREE.Quaternion().setFromAxisAngle(UP, this.root.rotation.y);
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(yawQ);
+    // Torso twist toward the aim, spread over the spine.
+    const twistAim = angDiff(this.root.rotation.y, this.aimYaw);
+    for (const [n, k] of [['Spine', 0.3], ['Spine1', 0.35], ['Spine2', 0.35]]) {
+      rotateBoneWorld(B[n], new THREE.Quaternion().setFromAxisAngle(UP, twistAim * k));
+    }
+    const aimRight = new THREE.Vector3(Math.cos(this.aimYaw), 0, -Math.sin(this.aimYaw));
     if (this.crouch > 0.01) {
       const c = this.crouch;
       B.Hips.position.y -= 38 * c; // model units are cm
@@ -261,13 +315,21 @@ export class SoldierBody {
     const aim = reloading ? Math.min(this.aiming, 0.35) : this.aiming;
     const pitch = THREE.MathUtils.lerp(-0.42, this.aimPitch, aim);
     const long = this.weaponSlot === 1;
-    const qp = new THREE.Quaternion().setFromAxisAngle(right, -pitch / 3);
+    const qp = new THREE.Quaternion().setFromAxisAngle(aimRight, -pitch / 3);
     const twist = new THREE.Quaternion().setFromAxisAngle(UP, (long ? 0.38 : 0.12) * (0.5 + aim * 0.5));
     for (const n of ['Spine', 'Spine1', 'Spine2']) {
       rotateBoneWorld(B[n], qp);
       rotateBoneWorld(B[n], new THREE.Quaternion().slerp(twist, 1 / 3));
     }
+    if (this.flinchAxis && Math.abs(this.flinchA) > 0.002) {
+      const k = THREE.MathUtils.clamp(this.flinchA, -0.35, 0.35);
+      rotateBoneWorld(B.Spine1, new THREE.Quaternion().setFromAxisAngle(this.flinchAxis, k * 0.5));
+      rotateBoneWorld(B.Spine2, new THREE.Quaternion().setFromAxisAngle(this.flinchAxis, k * 0.5));
+      if (this.flinchHead) rotateBoneWorld(B.Head, new THREE.Quaternion().setFromAxisAngle(this.flinchAxis, k * 1.2));
+    }
+    // Head follows the aim: less twist than the chest, and it looks up/down with the target.
     rotateBoneWorld(B.Neck, new THREE.Quaternion().setFromAxisAngle(UP, -0.3 * aim * (long ? 1 : 0.4)));
+    rotateBoneWorld(B.Head, new THREE.Quaternion().setFromAxisAngle(aimRight, -pitch * 0.25 * aim));
 
     if (!this.weapon) return;
     const yaw = this.aimYaw;
@@ -349,19 +411,44 @@ export class SoldierBody {
     const localDir = fromDir.clone().applyQuaternion(this.root.quaternion.clone().invert());
     this.fallAxis = new THREE.Vector3(localDir.z, 0, -localDir.x).normalize();
     if (this.fallAxis.lengthSq() < 0.1) this.fallAxis.set(1, 0, 0);
-    this.fallDur = headshot ? 0.45 : 0.7;
+    // Shot from the front → falls backwards (back arches); from behind → folds forward.
+    this.fallForward = localDir.z < 0;
+    this.fallDur = headshot ? 0.75 : 1.0;
+    this.headshotDeath = headshot;
     this.startQ = this.model.quaternion.clone();
+    this.limpSide = Math.random() < 0.5 ? -1 : 1;
+    // Drop the aim pose: the arms go back to the animation and fall limp.
+    this.actions.Idle.setEffectiveWeight(1);
+    this.actions.Walk.setEffectiveWeight(0);
+    this.actions.Run.setEffectiveWeight(0);
   }
 
   updateDeath(dt) {
     this.deathT += dt;
     const t = Math.min(1, this.deathT / this.fallDur);
-    const e = t * t; // accelerate like gravity
-    if (!this.settled) this.mixer.update(dt * (1 - t) * 0.6);
-    const q = new THREE.Quaternion().setFromAxisAngle(this.fallAxis, e * Math.PI / 2 * 0.97);
-    this.model.quaternion.copy(this.startQ).premultiply(q);
-    this.model.position.y = e * 0.12;
-    if (t >= 1) this.settled = true; // freeze on the last pose
+    if (!this.settled) {
+      this.mixer.update(dt * (1 - t) * 0.5);
+      // Knees give way first, then the body topples and accelerates like a falling weight.
+      const knees = smoothstep(0, 0.45, t);
+      const fall = Math.pow(THREE.MathUtils.clamp((t - 0.12) / 0.88, 0, 1), 2);
+      const B = this.bones;
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.model.getWorldQuaternion(new THREE.Quaternion()));
+      const fwdSign = this.fallForward ? 1 : -0.6;
+      rotateBoneWorld(B.LeftUpLeg, new THREE.Quaternion().setFromAxisAngle(right, -0.7 * knees));
+      rotateBoneWorld(B.RightUpLeg, new THREE.Quaternion().setFromAxisAngle(right, -0.5 * knees));
+      rotateBoneWorld(B.LeftLeg, new THREE.Quaternion().setFromAxisAngle(right, 1.2 * knees));
+      rotateBoneWorld(B.RightLeg, new THREE.Quaternion().setFromAxisAngle(right, 0.9 * knees));
+      rotateBoneWorld(B.Spine1, new THREE.Quaternion().setFromAxisAngle(right, 0.25 * fwdSign * knees));
+      rotateBoneWorld(B.Spine2, new THREE.Quaternion().setFromAxisAngle(right, 0.2 * fwdSign * knees));
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(this.model.getWorldQuaternion(new THREE.Quaternion()));
+      rotateBoneWorld(B.Neck, new THREE.Quaternion().setFromAxisAngle(fwd, 0.45 * this.limpSide * knees));
+      rotateBoneWorld(B.Head, new THREE.Quaternion().setFromAxisAngle(right, (this.headshotDeath ? -0.5 : 0.4) * fwdSign * knees));
+      const q = new THREE.Quaternion().setFromAxisAngle(this.fallAxis, fall * Math.PI / 2 * 0.93);
+      this.model.quaternion.copy(this.startQ).premultiply(q);
+      // Buckling knees lower the hips before the topple lays the body flat.
+      this.model.position.y = -0.28 * knees * (1 - fall) + fall * 0.1;
+      if (t >= 1) this.settled = true; // freeze on the last pose
+    }
     this.root.updateMatrixWorld(true);
   }
 }

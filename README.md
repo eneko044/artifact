@@ -33,9 +33,18 @@ más una carpeta de recursos.
   oclusión, silbido de balas, impactos, explosiones y reverberación exterior.
 - **Modos**: equipo 5 contra 5 o solo contra 1–7 bots; cuatro dificultades; bando CT o T.
 
+- **Apuntar con la mira (ADS)**: mantén el clic derecho y el arma se lleva a la cara alineando
+  el alza y el punto de mira reales de cada modelo con el centro de la pantalla (punto tritio en
+  el poste delantero). Zoom suave, sensibilidad proporcional, más precisión y paso más lento.
+- **Movimiento realista**: inercia del arma al arrancar, frenar, girar y saltar; balanceo en ocho
+  al andar; inclinación en desplazamientos laterales; respiración; el arma se recoge al pegarte
+  a una pared; inspección (F); cabeceo e inclinación suaves de la cámara; sacudida al recibir
+  impactos. Los bots mueven las piernas hacia donde caminan con el torso girado hacia su
+  objetivo, retroceden andando hacia atrás, acusan los impactos y caen doblando las rodillas.
+
 ## Controles
 
-WASD moverse · ratón apuntar/disparar · clic derecho mira (AWP) o puñalada · Espacio saltar ·
+WASD moverse · ratón apuntar/disparar · clic derecho apuntar con la mira (AWP: zoom, cuchillo: puñalada) · F inspeccionar · Espacio saltar ·
 Ctrl/C agacharse · Shift caminar · R recargar · 1–4 y Q armas · B comprar · E/G recoger/soltar ·
 Tab marcador · Esc pausa.
 

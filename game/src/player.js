@@ -129,6 +129,7 @@ export class PlayerController {
         case 'KeyR': c.wantReload = true; break;
         case 'Space': this.jumpBuffer = 0.12; break;
         case 'KeyG': if (c.slot === 1 || c.slot === 2) g.dropWeapon(c, c.slot, true); break;
+        case 'KeyF': if (!c.reloading) g.vm.inspect(); break;
         case 'KeyE': {
           const i = g.nearestDrop(c);
           if (i !== null) g.pickup(c, i);
@@ -182,7 +183,8 @@ export class PlayerController {
     const g = this.game;
     // Mouse look.
     const def = WEAPONS[c.weaponId()];
-    const zoom = c.scope && def.scope ? def.scope[c.scope - 1] / g.settings.fov : 1;
+    // Sensitivity follows the zoom so the aim feels the same through sights and scopes.
+    const zoom = c.scope && def.scope ? def.scope[c.scope - 1] / g.settings.fov : 1 - g.vm.ads * (1 - g.vm.adsZoom);
     const sens = 0.0022 * g.settings.sens * zoom;
     if (c.alive) {
       c.yaw -= this.mouseDX * sens;
@@ -223,11 +225,33 @@ export class PlayerController {
     const def = WEAPONS[c.weaponId()];
     let fov = g.settings.fov;
     this.landKick = Math.max(0, this.landKick - dt * 0.5);
+    // Aim down the sights while the right button is held (scopes and the knife use it themselves).
+    const adsWanted = c.alive && c.triggerAlt && !def.scope && def.id !== 'knife' && !def.grenade;
+    c.adsAmount = g.vm.ads;
     if (c.alive) {
       c.eyePos(cam.position);
       cam.position.y -= this.landKick;
-      cam.rotation.set(c.pitch + c.punch.x * 0.5, c.yaw + c.punch.y * 0.5, 0);
+      // Head motion: a soft step bob and a slight lean into strafes, damped while aiming.
+      const sp = Math.hypot(c.velocity.x, c.velocity.z);
+      const calm = 1 - g.vm.ads * 0.85;
+      this.headBob = (this.headBob || 0) + dt * (3.2 + sp * 1.45) * (c.crouch > 0.5 ? 0.7 : 1);
+      const bobAmt = c.onGround ? THREE.MathUtils.clamp(sp / 5.5, 0, 1) * (g.settings.headBob ?? 1) * calm : 0;
+      this.bobSmooth = (this.bobSmooth || 0) + (bobAmt - (this.bobSmooth || 0)) * Math.min(1, dt * 6);
+      const right = new THREE.Vector3(Math.cos(c.yaw), 0, -Math.sin(c.yaw));
+      const lateral = c.velocity.dot(right);
+      this.roll = (this.roll || 0) + ((-lateral * 0.0045) * calm - (this.roll || 0)) * Math.min(1, dt * 7);
+      cam.position.y += (Math.cos(this.headBob * 2) * 0.5 - 0.5) * 0.022 * this.bobSmooth;
+      cam.position.addScaledVector(right, Math.sin(this.headBob) * 0.012 * this.bobSmooth);
+      this.hitShake = Math.max(0, (this.hitShake || 0) - dt * 3);
+      const hs = this.hitShake * this.hitShake;
+      const t = performance.now() / 1000;
+      cam.rotation.set(
+        c.pitch + c.punch.x * 0.5 + Math.sin(t * 37) * 0.012 * hs,
+        c.yaw + c.punch.y * 0.5 + Math.sin(t * 29 + 1) * 0.012 * hs,
+        this.roll + Math.sin(this.headBob) * 0.004 * this.bobSmooth + Math.sin(t * 23) * 0.02 * hs,
+      );
       if (c.scope && def.scope) fov = def.scope[c.scope - 1];
+      else fov *= 1 - g.vm.ads * (1 - g.vm.adsZoom);
       g.hud.scope(c.scope > 0 && !!def.scope);
       this.firstPerson = true;
     } else if (this.deathT < 2.6 || !this.spectating) {
@@ -270,6 +294,13 @@ export class PlayerController {
     // Viewmodel.
     const sp = Math.hypot(c.velocity.x, c.velocity.z);
     g.vm.camera.quaternion.copy(cam.quaternion);
-    g.vm.update(dt, { mouseDX: this.vmDX, mouseDY: this.vmDY, speed: sp, onGround: c.onGround, crouch: c.crouch, hidden: c.scope > 0, sunDir: g.sunDir });
+    const vel = c.velocity.clone().applyQuaternion(cam.quaternion.clone().invert());
+    // Distance to whatever is right in front of the gun, to tuck it in against walls.
+    let wallDist = 99;
+    if (c.alive) {
+      const hit = g.world.raycast(cam.position, c.aimDir(new THREE.Vector3(), false), 1.4);
+      if (hit) wallDist = hit.dist;
+    }
+    g.vm.update(dt, { mouseDX: this.vmDX, mouseDY: this.vmDY, speed: sp, onGround: c.onGround, crouch: c.crouch, hidden: c.scope > 0, sunDir: g.sunDir, ads: adsWanted, vel, wallDist });
   }
 }

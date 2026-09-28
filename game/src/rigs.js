@@ -16,6 +16,18 @@ export const RIG_DATA = {
   he: { kind: 'nade', grip: [0, 0], gripAngle: 0.2 },
 };
 
+// Iron sights (same frame as above, cm): the rear notch/aperture and the front post tip.
+// `relief` is the eye-to-rear-sight distance in metres when aiming down the sights,
+// `zoom` the field-of-view multiplier while aiming.
+export const SIGHTS = {
+  ak47: { rear: [12.45, -2], front: [12.6, -38.7], relief: 0.27, zoom: 0.78 },
+  m4a4: { rear: [13.5, 18], front: [16.05, -25], relief: 0.1, zoom: 0.76 },
+  mp9: { rear: [8.4, 4], front: [8.4, -13.5], relief: 0.2, zoom: 0.84 },
+  usp: { rear: [7.4, 8.6], front: [7.15, -8.6], relief: 0.5, zoom: 0.88 },
+  glock: { rear: [7.35, 7.5], front: [7.15, -8.2], relief: 0.5, zoom: 0.88 },
+  deagle: { rear: [8.35, 10], front: [8.5, -10.8], relief: 0.52, zoom: 0.86 },
+};
+
 const cm = (v) => v / 100;
 const V = (x, y, z) => new THREE.Vector3(x, y, z);
 
@@ -42,6 +54,7 @@ export function buildRig(id) {
     slide: d.slide ? rel(d.slide) : null,
     muzzle: d.muzzle ? rel(d.muzzle) : null,
     eject: d.eject ? rel(d.eject, 1.5) : null,
+    sight: SIGHTS[id] ? { rear: rel(SIGHTS[id].rear), front: rel(SIGHTS[id].front), relief: SIGHTS[id].relief, zoom: SIGHTS[id].zoom } : null,
   };
   if (d.kind === 'rifle' || d.kind === 'bolt') {
     r.support = rel(d.support);

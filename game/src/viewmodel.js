@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { WEAPONS } from './config.js';
 import { TEX } from './effects.js';
 import { FirstPersonArms, updateMagazine } from './characters.js';
 
@@ -20,18 +19,27 @@ class Spring {
   constructor(k = 120, d = 14) { this.k = k; this.d = d; this.x = new THREE.Vector3(); this.v = new THREE.Vector3(); }
   impulse(v) { this.v.add(v); }
   update(dt) {
-    const a = this.x.clone().multiplyScalar(-this.k).addScaledVector(this.v, -this.d);
-    this.v.addScaledVector(a, dt);
-    this.x.addScaledVector(this.v, dt);
+    // Sub-step for stability at low frame rates.
+    const n = Math.max(1, Math.ceil(dt / 0.008));
+    const h = dt / n;
+    for (let i = 0; i < n; i++) {
+      const a = this.x.clone().multiplyScalar(-this.k).addScaledVector(this.v, -this.d);
+      this.v.addScaledVector(a, h);
+      this.x.addScaledVector(this.v, h);
+    }
   }
 }
+
+const smooth = (x) => x * x * (3 - 2 * x);
+const clamp = THREE.MathUtils.clamp;
 
 export class ViewModel {
   constructor(assets, team) {
     this.assets = assets;
     this.scene = new THREE.Scene();
     this.scene.environment = assets.envMap;
-    this.camera = new THREE.PerspectiveCamera(58, 1, 0.01, 10);
+    this.baseFov = 58;
+    this.camera = new THREE.PerspectiveCamera(this.baseFov, 1, 0.01, 10);
     this.scene.add(this.camera);
     this.key = new THREE.DirectionalLight(0xfff1dc, 2.4);
     this.key.position.set(-0.5, 1, 0.4);
@@ -42,22 +50,27 @@ export class ViewModel {
     // Muzzle light: lights the gun and the gloves on every shot.
     this.flashLight = new THREE.PointLight(0xffb060, 0, 1.6, 2);
     this.camera.add(this.flashLight);
-    this.rig = new THREE.Group(); // sway/bob/recoil
+    this.rig = new THREE.Group();
     this.camera.add(this.rig);
     this.arms = new FirstPersonArms(assets, team);
     this.camera.add(this.arms.root);
     this.models = {};
     this.current = null;
     this.currentId = null;
-    this.kick = new Spring(160, 16);
-    this.rotKick = new Spring(140, 13);
+    this.kick = new Spring(170, 17);
+    this.rotKick = new Spring(150, 14);
+    this.inertia = new Spring(90, 12); // lags behind acceleration
     this.sway = new THREE.Vector2();
+    this.swayLag = new THREE.Vector2();
     this.bobPhase = 0;
     this.bobAmt = 0;
     this.anim = null; // {type, t, dur}
     this.reloadT = null;
     this.reloadDur = 1;
     this.land = 0;
+    this.ads = 0; // 0 hip .. 1 aiming down the sights
+    this.block = 0; // weapon pushed back by a nearby wall
+    this.prevVel = new THREE.Vector3();
     this.buildFlash();
   }
 
@@ -85,6 +98,7 @@ export class ViewModel {
     if (!this.models[id]) {
       const m = this.assets.weaponModel(id);
       m.traverse((o) => { if (o.isMesh) { o.castShadow = false; o.receiveShadow = false; } });
+      this.prepareSights(m);
       this.models[id] = m;
     }
     const m = this.models[id];
@@ -92,7 +106,7 @@ export class ViewModel {
     this.currentId = id;
     const h = HOLD[id];
     m.userData.basePos = new THREE.Vector3(...h.pos);
-    m.userData.baseRot = new THREE.Euler(...h.rot);
+    m.userData.baseQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(...h.rot));
     this.rig.add(m);
     m.add(this.flash);
     this.flash.position.copy(m.userData.muzzle).add(new THREE.Vector3(0, 0, -0.015));
@@ -100,12 +114,31 @@ export class ViewModel {
     this.startAnim('draw', id === 'awp' ? 0.8 : 0.55);
   }
 
+  // Aim-down-sights pose: rear notch and front post lined up on the view axis.
+  prepareSights(m) {
+    const s = m.userData.rig.sight;
+    if (!s) return;
+    const u = s.front.clone().sub(s.rear).normalize();
+    const q = new THREE.Quaternion().setFromUnitVectors(u, new THREE.Vector3(0, 0, -1));
+    m.userData.adsQuat = q;
+    m.userData.adsPos = new THREE.Vector3(0, 0, -s.relief).sub(s.rear.clone().applyQuaternion(q));
+    m.userData.adsZoom = s.zoom;
+    // Tritium dot on the front post, like real night sights.
+    const dot = new THREE.Mesh(new THREE.SphereGeometry(0.0011, 10, 8), new THREE.MeshBasicMaterial({ color: 0x9dff6a, toneMapped: false }));
+    dot.position.copy(s.front).add(new THREE.Vector3(0, -0.0022, 0.001));
+    m.add(dot);
+  }
+
+  get canAds() { return !!(this.current && this.current.userData.adsPos); }
+  get adsZoom() { return this.current?.userData.adsZoom ?? 1; }
+
   startAnim(type, dur) { this.anim = { type, t: 0, dur }; }
 
   fire(def) {
-    const k = def.slot === 1 ? 1 : def.id === 'deagle' ? 1.6 : 0.8;
-    this.kick.impulse(new THREE.Vector3((Math.random() - 0.5) * 0.02, 0.012 * k, 0.55 * k * (def.id === 'awp' ? 1.8 : 1)));
-    this.rotKick.impulse(new THREE.Vector3(0.9 * k * (def.id === 'awp' ? 2 : 1), (Math.random() - 0.5) * 0.4, (Math.random() - 0.5) * 0.6));
+    const hip = 1 - this.ads;
+    const k = (def.slot === 1 ? 1 : def.id === 'deagle' ? 1.6 : 0.8) * (0.55 + hip * 0.45);
+    this.kick.impulse(new THREE.Vector3((Math.random() - 0.5) * 0.02 * hip, 0.012 * k, 0.55 * k * (def.id === 'awp' ? 1.8 : 1)));
+    this.rotKick.impulse(new THREE.Vector3(0.9 * k * (def.id === 'awp' ? 2 : 1), (Math.random() - 0.5) * 0.4, (Math.random() - 0.5) * 0.6 * hip));
     if (!def.suppressed && def.id !== 'knife' && !def.grenade) {
       this.flash.visible = true;
       this.flashFront.material.map = TEX.flashes[(Math.random() * TEX.flashes.length) | 0];
@@ -126,7 +159,8 @@ export class ViewModel {
   knifeSwing(alt) { this.startAnim(alt ? 'stab' : (Math.random() < 0.5 ? 'slashL' : 'slashR'), alt ? 0.8 : 0.42); }
   reload(dur) { this.reloadT = 0; this.reloadDur = dur; }
   throwNade() { this.startAnim('throw', 0.6); }
-  onLand(v) { this.land = Math.min(1, v / 8); }
+  inspect() { if (!this.anim && this.reloadT === null) this.startAnim('inspect', this.currentId === 'knife' ? 2.2 : 3.2); }
+  onLand(v) { this.land = Math.min(1, v / 8); this.inertia.impulse(new THREE.Vector3(0, -Math.min(0.6, v * 0.05), 0)); }
 
   // Muzzle position in camera space (for smoke / tracers in the world view).
   muzzleCameraSpace(out = new THREE.Vector3()) {
@@ -136,74 +170,137 @@ export class ViewModel {
     return this.camera.worldToLocal(out);
   }
 
-  update(dt, { mouseDX, mouseDY, speed, onGround, crouch, hidden, sunDir }) {
+  // vel: player velocity in camera space (x right, y up, z backward).
+  update(dt, { mouseDX, mouseDY, speed, onGround, crouch, hidden, sunDir, ads = false, vel, wallDist = 99 }) {
     if (!this.current) return;
     this.rig.visible = !hidden;
     this.arms.root.visible = !hidden;
-    this.sway.x += (THREE.MathUtils.clamp(-mouseDX * 0.0009, -0.06, 0.06) - this.sway.x) * Math.min(1, dt * 10);
-    this.sway.y += (THREE.MathUtils.clamp(-mouseDY * 0.0009, -0.05, 0.05) - this.sway.y) * Math.min(1, dt * 10);
-    const moving = onGround ? THREE.MathUtils.clamp(speed / 5.5, 0, 1) : 0;
-    this.bobAmt += (moving - this.bobAmt) * Math.min(1, dt * 6);
-    this.bobPhase += dt * (4 + speed * 1.45);
-    const t = performance.now() / 1000;
-    const breathe = Math.sin(t * 1.6) * 0.002;
-    const bx = Math.sin(this.bobPhase) * 0.011 * this.bobAmt;
-    const by = -Math.abs(Math.cos(this.bobPhase)) * 0.012 * this.bobAmt + breathe;
-    this.land = Math.max(0, this.land - dt * 3);
+    const m = this.current;
+    const ud = m.userData;
+    const busy = this.reloadT !== null || (this.anim && this.anim.type !== 'bolt');
+
+    // Weapon pushed back when the muzzle would clip into a wall.
+    const reach = -ud.front + (-ud.basePos.z) + 0.05;
+    const wantBlock = clamp((reach - wallDist) / 0.35, 0, 1);
+    this.block += (wantBlock - this.block) * Math.min(1, dt * 10);
+
+    const wantAds = ads && this.canAds && !busy && this.block < 0.3 ? 1 : 0;
+    this.ads += (wantAds - this.ads) * Math.min(1, dt * (wantAds ? 11 : 14));
+    const a = smooth(clamp(this.ads, 0, 1));
+    const hip = 1 - a * 0.8;
+
+    // Mouse sway: the gun trails behind the view, then springs back.
+    const tx = clamp(-mouseDX * 0.0009, -0.07, 0.07), ty = clamp(-mouseDY * 0.0009, -0.06, 0.06);
+    this.sway.x += (tx - this.sway.x) * Math.min(1, dt * 9);
+    this.sway.y += (ty - this.sway.y) * Math.min(1, dt * 9);
+    this.swayLag.x += (this.sway.x - this.swayLag.x) * Math.min(1, dt * 5);
+    this.swayLag.y += (this.sway.y - this.swayLag.y) * Math.min(1, dt * 5);
+
+    // Inertia from acceleration (starting, stopping, strafing, jumping).
+    const v = vel || new THREE.Vector3();
+    if (dt > 0) {
+      const acc = v.clone().sub(this.prevVel).divideScalar(dt);
+      this.inertia.impulse(new THREE.Vector3(-acc.x, -acc.y * 0.6, -acc.z).multiplyScalar(0.0009 * dt * 60));
+    }
+    this.prevVel.copy(v);
     this.kick.update(dt);
     this.rotKick.update(dt);
+    this.inertia.update(dt);
 
-    const m = this.current;
-    const bp = m.userData.basePos, br = m.userData.baseRot;
-    const pos = new THREE.Vector3(bp.x + bx + this.sway.x * 0.4, bp.y + by - crouch * 0.012 - this.land * 0.04, bp.z);
-    const rot = new THREE.Euler(br.x + this.sway.y, br.y + this.sway.x, br.z + this.sway.x * 0.8 - bx * 2);
-    pos.add(new THREE.Vector3(this.kick.x.x, this.kick.x.y * 0.2, this.kick.x.z * 0.08));
-    rot.x += this.rotKick.x.x * 0.06;
-    rot.y += this.rotKick.x.y * 0.04;
-    rot.z += this.rotKick.x.z * 0.04;
+    // Walk cycle: figure-of-eight, slower and smaller when crouched or aiming.
+    const moving = onGround ? clamp(speed / 5.5, 0, 1) : 0;
+    this.bobAmt += (moving - this.bobAmt) * Math.min(1, dt * 6);
+    this.bobPhase += dt * (3.2 + speed * 1.45) * (crouch > 0.5 ? 0.7 : 1);
+    const t = performance.now() / 1000;
+    const amp = this.bobAmt * (1 - a * 0.75);
+    const bx = Math.sin(this.bobPhase) * 0.012 * amp;
+    const by = (Math.cos(this.bobPhase * 2) * 0.5 - 0.5) * 0.013 * amp;
+    // Breathing / hand tremor (smaller when aiming, a little larger with pistols).
+    const br = (1 - a * 0.6) * (ud.rig.kind === 'pistol' ? 1.3 : 1);
+    const breatheX = (Math.sin(t * 0.9) * 0.0018 + Math.sin(t * 2.3) * 0.0006) * br;
+    const breatheY = (Math.sin(t * 1.6) * 0.0022 + Math.sin(t * 3.1) * 0.0005) * br;
+
+    // Base pose: hip → ADS blend.
+    const pos = ud.basePos.clone();
+    const quat = ud.baseQuat.clone();
+    if (ud.adsPos && a > 0) {
+      pos.lerp(ud.adsPos, a);
+      quat.slerp(ud.adsQuat, a);
+    }
+    pos.y -= crouch * 0.012 * hip;
+    pos.x += (bx + this.swayLag.x * 0.35 + breatheX) * hip;
+    pos.y += (by + breatheY) * hip - this.land * 0.035 * hip;
+    pos.x += clamp(this.inertia.x.x, -0.03, 0.03) * hip;
+    pos.y += clamp(this.inertia.x.y, -0.03, 0.03) * hip + clamp(-v.y * 0.0035, -0.025, 0.025) * (onGround ? 0 : 1) * hip;
+    pos.z += clamp(this.inertia.x.z, -0.03, 0.03) * hip;
+    pos.add(new THREE.Vector3(this.kick.x.x, this.kick.x.y * 0.2, this.kick.x.z * (0.08 - a * 0.03)));
+    const e = new THREE.Euler(
+      (this.swayLag.y + Math.cos(this.bobPhase * 2) * 0.006 * amp) * hip + this.rotKick.x.x * (0.06 - a * 0.025) + breatheY * 0.6,
+      this.swayLag.x * hip + this.rotKick.x.y * 0.04 * hip + breatheX * 0.6,
+      (this.swayLag.x * 0.8 - bx * 2 - clamp(v.x * 0.012, -0.08, 0.08)) * hip + this.rotKick.x.z * 0.04,
+    );
 
     if (this.anim) {
-      const a = this.anim;
-      a.t += dt;
-      const p = Math.min(1, a.t / a.dur);
+      const an = this.anim;
+      an.t += dt;
+      const p = Math.min(1, an.t / an.dur);
       const ease = (x) => 1 - Math.pow(1 - x, 3);
       const bell = (x) => Math.sin(Math.PI * x);
-      switch (a.type) {
-        case 'draw': { const e = 1 - ease(p); pos.y -= e * 0.22; rot.x -= e * 0.9; rot.z += e * 0.3; break; }
-        case 'bolt': { const b = bell(Math.min(1, p / 0.7)); rot.z += b * 0.3; pos.y -= b * 0.02; rot.x -= b * 0.06; break; }
+      switch (an.type) {
+        case 'draw': { const k = 1 - ease(p); pos.y -= k * 0.22; e.x -= k * 0.9; e.z += k * 0.3; break; }
+        case 'bolt': { const b = bell(Math.min(1, p / 0.7)); e.z += b * 0.3; pos.y -= b * 0.02; e.x -= b * 0.06; break; }
         case 'slashL':
         case 'slashR': {
-          const s = a.type === 'slashL' ? 1 : -1;
+          const s = an.type === 'slashL' ? 1 : -1;
           const b = bell(p);
-          rot.y += s * (0.9 - p * 1.8) * b; rot.x -= b * 0.5; rot.z += s * b * 0.7; pos.x -= s * b * 0.12; pos.z -= b * 0.08;
+          e.y += s * (0.9 - p * 1.8) * b; e.x -= b * 0.5; e.z += s * b * 0.7; pos.x -= s * b * 0.12; pos.z -= b * 0.08;
           break;
         }
-        case 'stab': { const b = p < 0.3 ? ease(p / 0.3) : 1 - ease((p - 0.3) / 0.7); pos.z -= b * 0.2; pos.y += b * 0.03; rot.x -= b * 0.2; break; }
-        case 'throw': { const b = bell(p); rot.x -= b * 1.4; pos.y += b * 0.08; pos.z -= b * 0.12; break; }
+        case 'stab': { const b = p < 0.3 ? ease(p / 0.3) : 1 - ease((p - 0.3) / 0.7); pos.z -= b * 0.2; pos.y += b * 0.03; e.x -= b * 0.2; break; }
+        case 'throw': { const b = bell(p); e.x -= b * 1.4; pos.y += b * 0.08; pos.z -= b * 0.12; break; }
+        case 'inspect': {
+          // Turn the gun to show the left side, then roll it to look at the ejection port.
+          const k1 = smooth(clamp(p / 0.2, 0, 1)) * (1 - smooth(clamp((p - 0.45) / 0.15, 0, 1)));
+          const k2 = smooth(clamp((p - 0.45) / 0.15, 0, 1)) * (1 - smooth(clamp((p - 0.8) / 0.2, 0, 1)));
+          e.y += k1 * 0.95 - k2 * 0.35;
+          e.z += k1 * 0.35 - k2 * 0.9;
+          e.x += k1 * 0.1 + k2 * 0.25;
+          pos.x -= (k1 * 0.07 + k2 * 0.05);
+          pos.y += (k1 * 0.04 + k2 * 0.05);
+          pos.z += k1 * 0.05;
+          break;
+        }
       }
       if (p >= 1) this.anim = null;
     }
-    // Reload progress drives the arms, the magazine and a tilt toward the support hand.
-    let rp = null;
+    // Pressed against a wall: tuck the muzzle down and in.
+    if (this.block > 0.001) {
+      const b = smooth(this.block);
+      pos.z += b * 0.1; pos.y -= b * 0.05; pos.x -= b * 0.02;
+      e.x -= b * 0.7; e.y += b * 0.25;
+    }
+
     if (this.reloadT !== null) {
       this.reloadT += dt / this.reloadDur;
       if (this.reloadT >= 1) this.reloadT = null;
     }
     m.position.copy(pos);
-    m.rotation.copy(rot);
-    // First apply the tilt of the reload pose (computed from the last frame's progress).
+    m.quaternion.setFromEuler(e).multiply(quat);
+    // Reload tilt (from last frame's pose): bring the magazine well into view.
     const rpNow = this.reloadT !== null ? this.arms.reload.pose : null;
     if (rpNow && rpNow.tilt) {
-      // Bring the gun up and in so the magazine well is in view.
-      const e = rpNow.env || 0;
-      m.position.y += rpNow.tilt.y + e * 0.05;
-      m.position.x -= e * 0.04;
+      const k = rpNow.env || 0;
+      m.position.y += rpNow.tilt.y + k * 0.05;
+      m.position.x -= k * 0.04;
       m.rotateZ(rpNow.tilt.z);
-      m.rotateX(rpNow.tilt.x + e * 0.08);
+      m.rotateX(rpNow.tilt.x + k * 0.08);
     }
+    // The viewmodel camera zooms a touch with the world camera so the sights stay crisp.
+    const vf = this.baseFov * (1 - a * (1 - this.adsZoom) * 0.9);
+    if (Math.abs(this.camera.fov - vf) > 0.01) { this.camera.fov = vf; this.camera.updateProjectionMatrix(); }
     this.camera.updateMatrixWorld(true);
     m.updateMatrixWorld(true);
-    rp = this.arms.pose(dt, hidden ? null : m, this.reloadT);
+    const rp = this.arms.pose(dt, hidden ? null : m, this.reloadT);
     updateMagazine(m, rp || {}, !!rp, dt);
 
     if (this.flashT > 0) {
@@ -212,6 +309,7 @@ export class ViewModel {
       if (this.flashT <= 0) { this.flash.visible = false; this.flashLight.intensity = 0; }
     }
     this.smokeT = Math.max(0, this.smokeT - dt);
+    this.land = Math.max(0, this.land - dt * 3);
     if (sunDir) {
       const local = sunDir.clone().applyQuaternion(this.camera.quaternion.clone().invert());
       this.key.position.copy(local);

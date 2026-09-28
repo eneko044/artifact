@@ -394,6 +394,8 @@ export class Game {
     if (!c.onGround) s += def.jumpSpread || 0.15;
     s *= 1 - c.crouch * 0.28;
     if (def.auto) s += Math.min(c.shotsFired, 12) * 0.0011;
+    // Aiming down the sights tightens the cone (and moving while aiming hurts less).
+    if (c.adsAmount) s *= 1 - 0.55 * c.adsAmount;
     return s;
   }
 
@@ -546,6 +548,12 @@ export class Game {
       this.audio.play(group === 'head' ? 'headshot' : 'hit', { pos: point, volume: 0.5 });
     }
     if (victim.brain && attacker) victim.brain.hearNoise(attacker.pos, this.time);
+    if (victim.body && dir) victim.body.flinch(dir, group === 'head');
+    if (victim.isPlayer && dir) {
+      // Getting hit knocks the view and the gun.
+      this.controller.hitShake = Math.min(1, (this.controller.hitShake || 0) + amount / 60);
+      this.vm.rotKick.impulse(new THREE.Vector3(0.6, (Math.random() - 0.5) * 1.2, (Math.random() - 0.5) * 1.5));
+    }
     if (victim.hp <= 0) this.kill(victim, attacker, weapon, group === 'head', dir || new THREE.Vector3(0, 0, 1));
   }
 
@@ -874,7 +882,7 @@ export class Game {
       const sp = Math.hypot(b.velocity.x, b.velocity.z);
       const rdef = WEAPONS[b.weaponId()];
       const reloadT = b.reloading ? THREE.MathUtils.clamp(1 - (b.reloadEnd - now) / rdef.reload, 0, 1) : null;
-      b.body.update(dt, sp, b.yaw + b.punch.y, b.pitch + b.punch.x, b.crouch > 0.5, !!(b.brain.target && now - b.brain.lastSeenT < 2), reloadT);
+      b.body.update(dt, b.velocity, b.yaw + b.punch.y, b.pitch + b.punch.x, b.crouch > 0.5, !!(b.brain.target && now - b.brain.lastSeenT < 2), reloadT);
       if (b.heat > 0) {
         b.heat = Math.max(0, b.heat - dt);
         if (b.heat > 0.6 && Math.random() < dt * 8 && b.body.weapon) this.effects.barrelSmoke(b.body.muzzleWorld(), b.heat / 3);

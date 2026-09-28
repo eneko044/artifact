@@ -94,6 +94,7 @@ export class Combatant {
     const w = WEAPONS[this.weaponId()];
     let s = w.speed;
     if (this.scope > 0) s *= 0.6;
+    if (this.adsAmount) s *= 1 - 0.28 * this.adsAmount; // careful steps while aiming
     return s;
   }
 
