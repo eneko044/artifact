@@ -71,44 +71,53 @@ export class Assets {
       })));
     }
 
+    // Binary assets are shipped as base64 JSON (the host only serves web media types).
+    const bin = (url) => fetch(`${url}.json`).then((r) => {
+      if (!r.ok) throw new Error(`${url}: ${r.status}`);
+      return r.json();
+    }).then(({ b64 }) => {
+      const s = atob(b64);
+      const u = new Uint8Array(s.length);
+      for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+      return u.buffer;
+    });
+    const glb = (url, base) => bin(url).then((buf) => new Promise((res, rej) => gl.parse(buf, base, res, rej)));
+
     for (const name of PROP_MODELS) {
-      jobs.push(track(new Promise((res, rej) => {
-        gl.load(`assets/models/${name}/${name}.gltf`, (g) => {
-          g.scene.traverse((o) => {
-            if (o.isMesh) {
-              o.castShadow = true;
-              o.receiveShadow = true;
-              const m = o.material;
-              if (m.map) m.map.anisotropy = Math.min(8, this.maxAniso);
-              m.envMapIntensity = 0.5;
-            }
-          });
-          this.models[name] = g.scene;
-          res();
-        }, undefined, rej);
+      jobs.push(track(glb(`assets/models/${name}/${name}.glb`, `assets/models/${name}/`).then((g) => {
+        g.scene.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+            const m = o.material;
+            if (m.map) m.map.anisotropy = Math.min(8, this.maxAniso);
+            m.envMapIntensity = 0.5;
+          }
+        });
+        this.models[name] = g.scene;
       })));
     }
 
-    jobs.push(track(new Promise((res, rej) => {
-      gl.load('assets/models/Soldier.glb', (g) => { this.soldier = g; res(); }, undefined, rej);
-    })));
+    jobs.push(track(glb('assets/models/Soldier.glb', 'assets/models/').then((g) => { this.soldier = g; })));
 
     const fbxSources = new Set(Object.values(WEAPONS).filter((w) => w.model.kind === 'fbx').map((w) => w.model.src));
     for (const src of fbxSources) {
-      jobs.push(track(new Promise((res, rej) => {
-        fl.load(src, (obj) => { this.guns[src] = obj; res(); }, undefined, rej);
-      })));
+      jobs.push(track(bin(src).then((buf) => { this.guns[src] = fl.parse(buf, 'assets/guns/'); })));
     }
 
-    jobs.push(track(new Promise((res, rej) => {
-      rl.load('assets/hdri/sky_1k.hdr', (hdr) => {
-        hdr.mapping = THREE.EquirectangularReflectionMapping;
-        this.skyTexture = hdr;
-        const pmrem = new THREE.PMREMGenerator(this.renderer);
-        this.envMap = pmrem.fromEquirectangular(hdr).texture;
-        pmrem.dispose();
-        res();
-      }, undefined, rej);
+    jobs.push(track(bin('assets/hdri/sky_1k.hdr').then((buf) => {
+      const d = rl.parse(buf);
+      const hdr = new THREE.DataTexture(d.data, d.width, d.height, THREE.RGBAFormat, d.type);
+      hdr.colorSpace = THREE.LinearSRGBColorSpace;
+      hdr.minFilter = hdr.magFilter = THREE.LinearFilter;
+      hdr.generateMipmaps = false;
+      hdr.flipY = true;
+      hdr.needsUpdate = true;
+      hdr.mapping = THREE.EquirectangularReflectionMapping;
+      this.skyTexture = hdr;
+      const pmrem = new THREE.PMREMGenerator(this.renderer);
+      this.envMap = pmrem.fromEquirectangular(hdr).texture;
+      pmrem.dispose();
     })));
 
     await Promise.all(jobs);
