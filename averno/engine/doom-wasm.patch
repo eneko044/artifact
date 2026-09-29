@@ -1,0 +1,262 @@
+diff --git a/opl/opl.c b/opl/opl.c
+index a1aa1d9..cc1b4fc 100644
+--- a/opl/opl.c
++++ b/opl/opl.c
+@@ -285,6 +285,13 @@ opl_init_result_t OPL_Detect(void)
+     int result1, result2;
+     int i;
+ 
++#ifdef __EMSCRIPTEN__
++    // The only driver on the web is the software emulator, which is always an
++    // OPL3. Skip the timer handshake: it waits for the audio callback, which
++    // cannot run while this loop blocks the browser's only thread.
++    return OPL_INIT_OPL3;
++#endif
++
+     // Reset both timers:
+     OPL_WriteRegister(OPL_REG_TIMER_CTRL, 0x60);
+ 
+diff --git a/src/doom/d_main.c b/src/doom/d_main.c
+index 9a462e2..426c4c3 100644
+--- a/src/doom/d_main.c
++++ b/src/doom/d_main.c
+@@ -367,6 +367,29 @@ boolean D_GrabMouseCallback(void)
+ //
+ //  D_RunFrame
+ //
++static boolean web_quit_requested = false;
++
++// Lets the web page leave the game cleanly (settings saved, audio closed).
++EMSCRIPTEN_KEEPALIVE void web_quit(void)
++{
++    web_quit_requested = true;
++}
++
++// Bit flags describing what is on screen, polled by the web page:
++// 1 menu open, 2 playing a level, 4 automap, 8 paused, 16 demo, 32 player dead.
++EMSCRIPTEN_KEEPALIVE int web_state(void)
++{
++    int state = 0;
++
++    if (menuactive) state |= 1;
++    if (gamestate == GS_LEVEL) state |= 2;
++    if (automapactive) state |= 4;
++    if (paused) state |= 8;
++    if (demoplayback) state |= 16;
++    if (gamestate == GS_LEVEL && players[consoleplayer].playerstate == PST_DEAD) state |= 32;
++    return state;
++}
++
+ void D_RunFrame()
+ {
+     int nowtime;
+@@ -374,6 +397,10 @@ void D_RunFrame()
+     static int wipestart;
+     static boolean wipe;
+ 
++    if (web_quit_requested) {
++        I_Quit();
++    }
++
+     if (wipe) {
+         do {
+             nowtime = I_GetTime();
+diff --git a/src/doom/g_game.c b/src/doom/g_game.c
+index f23586b..bb3ac36 100644
+--- a/src/doom/g_game.c
++++ b/src/doom/g_game.c
+@@ -15,6 +15,7 @@
+ // DESCRIPTION:  none
+ //
+ 
++#include <emscripten.h>
+ #include <emscripten/websocket.h>
+ #include <math.h>
+ #include <stdlib.h>
+@@ -370,23 +371,12 @@ void G_BuildTiccmd(ticcmd_t *cmd, int maketic)
+         side += sidemove[speed];
+     }
+ 
+-    // fullscreen
+-    if (gamekeydown[key_fullscreen]) {
+-        EmscriptenFullscreenChangeEvent fsce;
+-        emscripten_get_fullscreen_status(&fsce);
+-        if (!fsce.isFullscreen) {
+-            printf("doom: 11, entering fullscreen");
+-            emscripten_request_fullscreen("#canvas", 1);
+-            emscripten_sleep(1000);
+-        }
+-    }
+-
+     // buttons
+     cmd->chatchar = HU_dequeueChatChar();
+ 
+     if (gamekeydown[key_fire] || mousebuttons[mousebfire] || joybuttons[joybfire]) cmd->buttons |= BT_ATTACK;
+ 
+-    if (gamekeydown[key_use] || joybuttons[joybuse] || mousebuttons[mousebuse]) {
++    if (gamekeydown[key_use] || gamekeydown[key_use_alt] || joybuttons[joybuse] || mousebuttons[mousebuse]) {
+         cmd->buttons |= BT_USE;
+         // clear double clicks if hit use button
+         dclicks = 0;
+@@ -1488,6 +1478,9 @@ void G_DoSaveGame(void)
+ 
+     players[consoleplayer].message = DEH_String(GGSAVED);
+ 
++    // Let the web page copy the new savegame to persistent storage.
++    EM_ASM({ if (Module.onPersist) Module.onPersist(); });
++
+     // draw the pattern into the back screen
+     R_FillBackScreen();
+ }
+diff --git a/src/doom/m_menu.c b/src/doom/m_menu.c
+index 0da4869..8cb9d10 100644
+--- a/src/doom/m_menu.c
++++ b/src/doom/m_menu.c
+@@ -681,10 +681,9 @@ void M_SaveSelect(int choice)
+     {
+         savegamestrings[choice][0] = 0;
+ 
+-        if (joypadSave)
+-        {
+-            SetDefaultSaveName(choice);
+-        }
++        // Name empty slots after the map (vanilla only did this for the
++        // joypad), so touch screens without a keyboard can save too.
++        SetDefaultSaveName(choice);
+     }
+     saveCharIndex = strlen(savegamestrings[choice]);
+ }
+diff --git a/src/doomtype.h b/src/doomtype.h
+index 9947a07..ee1bcdf 100644
+--- a/src/doomtype.h
++++ b/src/doomtype.h
+@@ -100,12 +100,20 @@
+ 
+ #include <inttypes.h>
+ 
+-#if defined(__cplusplus) || defined(__bool_true_false_are_defined)
++#if defined(__cplusplus)
+ 
+ // Use builtin bool type with C++.
+ 
+ typedef bool boolean;
+ 
++#elif defined(__bool_true_false_are_defined)
++
++// <stdbool.h> was included first (the Emscripten headers do this). Keep
++// boolean as wide as the enum below: with a one-byte bool here, files that
++// see different sizes for the same globals overwrite their neighbours.
++
++typedef int boolean;
++
+ #else
+ 
+ typedef enum 
+diff --git a/src/i_input.c b/src/i_input.c
+index e91564c..2bf823e 100644
+--- a/src/i_input.c
++++ b/src/i_input.c
+@@ -466,3 +466,59 @@ void I_BindInputVariables(void)
+     M_BindIntVariable("vanilla_keyboard_mapping",  &vanilla_keyboard_mapping);
+     M_BindIntVariable("novert",                    &novert);
+ }
++
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++
++// Entry points for the web page: the on-screen touch controls feed the
++// same event queue as the physical keyboard and mouse.
++
++EMSCRIPTEN_KEEPALIVE void web_key(int down, int key)
++{
++    event_t event = {0};
++
++    event.type = down ? ev_keydown : ev_keyup;
++    event.data1 = key;
++    if (down)
++    {
++        event.data2 = key;
++        event.data3 = key < 128 ? key : 0;
++    }
++    D_PostEvent(&event);
++}
++
++EMSCRIPTEN_KEEPALIVE void web_mouse_button(int button, int on)
++{
++    event_t event = {0};
++
++    if (on)
++    {
++        mouse_button_state |= (1 << button);
++    }
++    else
++    {
++        mouse_button_state &= ~(1 << button);
++    }
++
++    event.type = ev_mouse;
++    event.data1 = mouse_button_state;
++    D_PostEvent(&event);
++}
++
++EMSCRIPTEN_KEEPALIVE void web_mouse_move(int dx, int dy)
++{
++    event_t event = {0};
++
++    event.type = ev_mouse;
++    event.data1 = mouse_button_state;
++    event.data2 = dx;
++    event.data3 = dy;
++    D_PostEvent(&event);
++}
++
++EMSCRIPTEN_KEEPALIVE void web_save_settings(void)
++{
++    M_SaveDefaults();
++    EM_ASM({ if (Module.onPersist) Module.onPersist(); });
++}
++#endif
+diff --git a/src/m_config.c b/src/m_config.c
+index 422824c..f160073 100644
+--- a/src/m_config.c
++++ b/src/m_config.c
+@@ -392,6 +392,7 @@ static default_t doom_defaults_list[] = {
+     //
+ 
+     CONFIG_VARIABLE_KEY(key_use),
++    CONFIG_VARIABLE_KEY(key_use_alt),
+ 
+     //!
+     // Keyboard key to turn on strafing.  When held down, pressing the
+diff --git a/src/m_controls.c b/src/m_controls.c
+index 5fe2131..7f33a80 100644
+--- a/src/m_controls.c
++++ b/src/m_controls.c
+@@ -35,6 +35,7 @@ int key_strafeleft = ',';
+ int key_straferight = '.';
+ int key_fire = KEY_RCTRL;
+ int key_use = ' ';
++int key_use_alt = 0;
+ int key_strafe = KEY_RALT;
+ int key_speed = KEY_RSHIFT;
+ int key_strafe_alt = KEY_RALT;
+@@ -229,6 +230,7 @@ void M_BindBaseControls(void)
+     M_BindIntVariable("key_straferight", &key_straferight);
+     M_BindIntVariable("key_fire", &key_fire);
+     M_BindIntVariable("key_use", &key_use);
++    M_BindIntVariable("key_use_alt", &key_use_alt);
+     M_BindIntVariable("key_strafe", &key_strafe);
+     M_BindIntVariable("key_speed", &key_speed);
+     M_BindIntVariable("key_strafe_alt", &key_strafe_alt);
+diff --git a/src/m_controls.h b/src/m_controls.h
+index a316685..7a22181 100644
+--- a/src/m_controls.h
++++ b/src/m_controls.h
+@@ -26,6 +26,7 @@ extern int key_strafeleft;
+ extern int key_straferight;
+ extern int key_fire;
+ extern int key_use;
++extern int key_use_alt;
+ extern int key_strafe;
+ extern int key_speed;
+ extern int key_strafe_alt;

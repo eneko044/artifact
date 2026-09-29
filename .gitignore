@@ -3,3 +3,5 @@ game/dev.html
 game/dev/*.bundle.js
 game/assets/**/*.json
 game/measure-dev.html
+averno/dev.html
+averno/data/*.json

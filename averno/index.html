@@ -1,0 +1,873 @@
+<title>Averno</title>
+<meta name="description" content="Freedoom sobre el motor Chocolate Doom compilado a WebAssembly: los 68 niveles, sprites, texturas, sonido y música OPL en el navegador.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800;900&family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap">
+<style>
+/* Layout: launcher = pixel title strip, then the selected campaign's title screen beside a
+   setup column (campaign, start, difficulty, options, play), then controls / cheats / credits.
+   The game itself takes the whole viewport. Single dark look, drawn from Doom's PLAYPAL. */
+:root {
+  color-scheme: dark;
+  --void: #0d0a08;
+  --slab: #17110d;
+  --slab-2: #221913;
+  --edge: #3b2c22;
+  --bone: #ecdfc4;
+  --ash: #a8977e;
+  --blood: #b8241a;
+  --blood-hi: #d9362a;
+  --flame: #f2932c;
+  --nukage: #83c447;
+  --display: 'Big Shoulders Display', Impact, 'Arial Narrow', sans-serif;
+  --body: 'IBM Plex Sans Condensed', 'Arial Narrow', system-ui, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, Menlo, Consolas, monospace;
+}
+html, body { height: 100%; }
+body {
+  margin: 0; color: var(--bone); font: 400 15px/1.5 var(--body);
+  background: radial-gradient(1100px 520px at 78% -8%, rgba(184, 36, 26, 0.2), transparent 70%) no-repeat, var(--void);
+}
+[hidden] { display: none !important; }
+button, select, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--flame); outline-offset: 2px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.px { image-rendering: pixelated; image-rendering: crisp-edges; }
+
+/* ---------- launcher ---------- */
+#launcher { max-width: 1180px; margin: 0 auto; padding-inline: clamp(16px, 4vw, 40px); padding-block: clamp(20px, 4vw, 44px) 40px; display: grid; gap: clamp(22px, 3vw, 34px); }
+.head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px 32px; }
+.head h1 {
+  flex: 0 1 auto; min-width: 0; margin: 0; padding-right: 0.06em; font: 900 clamp(68px, 12vw, 136px)/0.8 var(--display); letter-spacing: 0.05em; text-transform: uppercase;
+  background: linear-gradient(180deg, #ffe7b0 0%, #f7a53a 34%, #cf3a1c 64%, #6b1109 100%); -webkit-background-clip: text; background-clip: text; color: transparent;
+  -webkit-text-stroke: 1px rgba(0, 0, 0, 0.45); filter: drop-shadow(0 5px 0 #000) drop-shadow(0 0 28px rgba(184, 36, 26, 0.35));
+}
+.lede { flex: 1 1 100%; margin: 0; max-width: 64ch; color: var(--ash); font-size: 17px; text-wrap: pretty; }
+.lede strong { color: var(--bone); font-weight: 600; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-left: auto; padding-bottom: 6px; }
+.chip { font: 500 12px/1 var(--mono); letter-spacing: 0.04em; color: var(--ash); border: 1px solid var(--edge); padding: 6px 8px; white-space: nowrap; }
+.chip b { color: var(--bone); font-weight: 600; }
+
+.setup { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: clamp(18px, 3vw, 32px); align-items: start; }
+.monitor { margin: 0; background: #000; border: 1px solid var(--edge); padding: clamp(8px, 1.4vw, 14px); box-shadow: 0 30px 60px -30px rgba(0, 0, 0, 0.9); }
+.monitor img { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; max-width: 100%; }
+.monitor figcaption { display: flex; flex-wrap: wrap; gap: 4px 18px; justify-content: space-between; padding: 12px 4px 2px; font-size: 14px; color: var(--ash); }
+.monitor figcaption b { font: 800 20px/1.1 var(--display); letter-spacing: 0.04em; text-transform: uppercase; color: var(--bone); }
+.eps { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0; padding: 0; list-style: none; font: 500 12px/1.4 var(--mono); color: var(--ash); }
+.eps li b { color: var(--flame); font-weight: 600; }
+
+.panel { background: var(--slab); border: 1px solid var(--edge); padding: clamp(16px, 2vw, 22px); display: grid; gap: 18px; }
+fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+legend, .label { font: 700 13px/1 var(--display); letter-spacing: 0.16em; text-transform: uppercase; color: var(--flame); padding: 0; margin-bottom: 10px; }
+.label { display: block; }
+.camps { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.camp { position: relative; display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 10px; align-items: center; padding: 8px; border: 1px solid var(--edge); background: var(--slab-2); cursor: pointer; }
+.camp input { position: absolute; opacity: 0; pointer-events: none; }
+.camp img { width: 56px; height: auto; aspect-ratio: 4 / 3; display: block; }
+.camp b { display: block; font: 800 17px/1.1 var(--display); letter-spacing: 0.05em; text-transform: uppercase; }
+.camp small { display: block; font-size: 12px; line-height: 1.3; color: var(--ash); }
+.camp:has(input:checked) { border-color: var(--flame); background: #2b1d14; }
+.camp:has(input:focus-visible) { outline: 2px solid var(--flame); outline-offset: 2px; }
+
+.select { width: 100%; padding: 10px 12px; background: var(--slab-2); border: 1px solid var(--edge); border-radius: 0; font: 500 14px/1.2 var(--mono); }
+.skills { display: grid; gap: 4px; }
+.skills.off { opacity: 0.5; }
+.skill { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-items: center; padding: 6px 8px; border: 1px solid transparent; cursor: pointer; }
+.skill input { position: absolute; opacity: 0; pointer-events: none; }
+.skill img { width: 24px; height: 31px; object-fit: contain; object-position: bottom; }
+.skill span { display: block; min-width: 0; }
+.skill b { font-weight: 600; }
+.skill i { font: 500 11px/1 var(--mono); font-style: normal; color: var(--ash); margin-left: 6px; }
+.skill small { display: block; font-size: 12.5px; line-height: 1.3; color: var(--ash); }
+.skill:hover { background: var(--slab-2); }
+.skill:has(input:checked) { border-color: var(--flame); background: #2b1d14; }
+.skill:has(input:focus-visible) { outline: 2px solid var(--flame); outline-offset: 2px; }
+.note { margin: 6px 0 0; font-size: 12.5px; color: var(--ash); }
+
+.opts { display: grid; gap: 8px; }
+.opt { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; align-items: start; cursor: pointer; }
+.opt input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--blood-hi); }
+.opt small { display: block; font-size: 12.5px; color: var(--ash); line-height: 1.3; }
+
+.play { display: grid; gap: 8px; }
+#play {
+  width: 100%; padding: 16px 20px 14px; border: 0; border-radius: 0; cursor: pointer;
+  font: 900 30px/1 var(--display); letter-spacing: 0.14em; text-transform: uppercase; color: #fff4e0;
+  background: linear-gradient(#c92b1f, #8f170f); box-shadow: inset 0 1px 0 rgba(255, 200, 160, 0.35), inset 0 -3px 0 rgba(0, 0, 0, 0.35), 0 10px 30px -12px rgba(217, 54, 42, 0.8);
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.45);
+}
+#play:hover { background: linear-gradient(#dc3a2d, #a11d13); }
+#play:active { transform: translateY(1px); }
+.play p { margin: 0; font: 500 12px/1.4 var(--mono); color: var(--ash); text-align: center; }
+
+.info { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1fr); gap: clamp(18px, 3vw, 32px); border-top: 1px solid var(--edge); padding-top: clamp(18px, 3vw, 28px); }
+.info h2 { margin: 0 0 12px; font: 800 20px/1 var(--display); letter-spacing: 0.08em; text-transform: uppercase; }
+.keys { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px 14px; margin: 0; font-size: 14px; }
+.keys dt { color: var(--ash); }
+.keys dd { margin: 0; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+kbd {
+  display: inline-grid; place-items: center; min-width: 1.9em; height: 1.75em; padding: 0 0.4em; box-sizing: border-box;
+  font: 600 11.5px/1 var(--mono); color: var(--bone); background: var(--slab-2);
+  border: 1px solid var(--edge); border-bottom: 3px solid #0a0706;
+}
+.keys .or { font-size: 12px; color: var(--ash); }
+.cheats { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; font-size: 14px; }
+.cheats code { font: 600 13px/1 var(--mono); color: var(--nukage); margin-right: 8px; }
+.info p, .credits li { font-size: 14px; color: var(--ash); margin: 0; }
+.info p + p { margin-top: 10px; }
+.credits { margin: 0; padding: 0; list-style: none; display: grid; gap: 9px; }
+.credits b { color: var(--bone); font-weight: 600; }
+a { color: var(--flame); text-underline-offset: 2px; }
+
+/* ---------- game stage ---------- */
+#stage { position: fixed; inset: 0; z-index: 10; background: #000; display: flex; flex-direction: column; user-select: none; -webkit-user-select: none; touch-action: none; }
+#screen { position: relative; flex: 1 1 auto; min-height: 0; display: grid; place-items: center; overflow: hidden; }
+#screen canvas { display: block; background: #000; }
+#bar {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 3; display: flex; gap: 8px; align-items: center;
+  padding: calc(8px + env(safe-area-inset-top, 0px)) 12px 8px; background: linear-gradient(rgba(0, 0, 0, 0.75), transparent);
+  transition: opacity 0.25s;
+}
+#stage.locked #bar { opacity: 0; pointer-events: none; }
+#bar .where { flex: 1; min-width: 0; font: 600 13px/1.2 var(--mono); color: var(--ash); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tb { border: 1px solid rgba(236, 223, 196, 0.25); background: rgba(13, 10, 8, 0.7); padding: 7px 11px; font: 600 12px/1 var(--mono); letter-spacing: 0.04em; text-transform: uppercase; cursor: pointer; border-radius: 0; }
+.tb:hover { border-color: var(--flame); color: var(--flame); }
+.tb[aria-pressed="true"] { color: var(--flame); }
+#hint {
+  position: absolute; z-index: 2; left: 50%; bottom: 18%; transform: translateX(-50%); max-width: calc(100% - 32px);
+  padding: 12px 18px; border: 1px solid var(--flame); background: rgba(13, 10, 8, 0.85); cursor: pointer;
+  font: 600 14px/1.3 var(--mono); color: var(--bone); text-align: center;
+}
+#hint b { color: var(--flame); }
+
+#loader { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; background: #000; }
+#loader .box { width: min(560px, calc(100% - 32px)); display: grid; gap: 14px; }
+#loader img { width: 100%; height: auto; aspect-ratio: 4 / 3; max-width: 100%; opacity: 0.55; }
+#load-text { margin: 0; font: 600 14px/1.4 var(--mono); color: var(--bone); font-variant-numeric: tabular-nums; }
+.meter { height: 10px; background: var(--slab-2); border: 1px solid var(--edge); }
+.meter i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--blood), var(--flame)); transition: width 0.15s linear; }
+#fail { position: absolute; inset: 0; z-index: 5; display: grid; place-items: center; background: rgba(0, 0, 0, 0.92); padding-inline: 16px; }
+#fail .box { max-width: 520px; display: grid; gap: 12px; }
+#fail h2 { margin: 0; font: 800 28px/1 var(--display); letter-spacing: 0.06em; text-transform: uppercase; color: var(--blood-hi); }
+#fail p { margin: 0; color: var(--ash); }
+#fail pre { margin: 0; max-height: 30vh; overflow: auto; padding: 10px; background: var(--slab); border: 1px solid var(--edge); font: 500 12px/1.4 var(--mono); color: var(--bone); white-space: pre-wrap; }
+#fail button { justify-self: start; }
+
+/* ---------- touch controls ---------- */
+#touch { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+#touch > * { pointer-events: auto; }
+#look { position: absolute; inset: 0; }
+#pad {
+  position: absolute; left: calc(18px + env(safe-area-inset-left, 0px)); bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+  width: 148px; height: 148px; border-radius: 50%; border: 2px solid rgba(236, 223, 196, 0.28); background: rgba(13, 10, 8, 0.35);
+}
+#knob { position: absolute; left: 50%; top: 50%; width: 58px; height: 58px; margin: -29px 0 0 -29px; border-radius: 50%; background: rgba(236, 223, 196, 0.3); border: 2px solid rgba(236, 223, 196, 0.5); }
+.tbtns {
+  position: absolute; right: calc(14px + env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  display: grid; grid-template-columns: repeat(2, 58px); grid-auto-rows: 58px; gap: 10px; pointer-events: none;
+}
+.tbtns button {
+  pointer-events: auto; border-radius: 50%; border: 2px solid rgba(236, 223, 196, 0.35); background: rgba(13, 10, 8, 0.45);
+  font: 700 11px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.02em; padding: 0; touch-action: none;
+}
+.tbtns button.on { background: rgba(242, 147, 44, 0.45); border-color: var(--flame); }
+.tbtns .fire { grid-column: 2; grid-row: 2 / span 2; border-radius: 40px; background: rgba(184, 36, 26, 0.55); border-color: rgba(255, 160, 120, 0.6); font-size: 13px; }
+.tbtns .use { grid-column: 1; grid-row: 3; }
+.tbtns .next { grid-column: 1; grid-row: 2; }
+.tbtns .map { grid-column: 1; grid-row: 1; }
+.tbtns .menu { grid-column: 2; grid-row: 1; }
+
+@media (orientation: portrait) {
+  #stage.touch #screen { flex: 0 0 auto; height: min(75vw, 58vh); margin-top: calc(44px + env(safe-area-inset-top, 0px)); }
+  #stage.touch #bar { background: none; }
+}
+
+@media (max-width: 900px) {
+  .setup { grid-template-columns: minmax(0, 1fr); }
+  .info { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .info section:first-child { grid-column: 1 / -1; }
+}
+@media (max-width: 560px) {
+  .chips { justify-content: flex-start; margin-left: 0; }
+  .camps { grid-template-columns: minmax(0, 1fr); }
+  .info { grid-template-columns: minmax(0, 1fr); }
+  #play { font-size: 26px; }
+  .tb { padding: 7px 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+</style>
+
+<main id="launcher">
+  <header class="head">
+    <h1>Averno</h1>
+    <div class="chips" aria-label="Componentes">
+      <span class="chip">motor <b>Chocolate Doom 3.0.1</b></span>
+      <span class="chip">recursos <b>Freedoom 0.13.0</b></span>
+      <span class="chip">35 tics/s · 320×200</span>
+    </div>
+    <p class="lede">El motor original de Doom, compilado a WebAssembly y alimentado con <strong>Freedoom</strong>: sprites, texturas, sonidos, música OPL3 y 68 niveles libres. Mismas armas, mismos monstruos, mismas puertas secretas. Las partidas se guardan en este navegador.</p>
+  </header>
+
+  <section class="setup" aria-label="Preparar partida">
+    <figure class="monitor">
+      <img id="shot" class="px" src="img/titlepic1.png" alt="Pantalla de título de Freedoom: Fase 1" width="320" height="200">
+      <figcaption>
+        <span><b id="shot-name">Fase 1</b></span>
+        <ul class="eps" id="shot-eps"></ul>
+      </figcaption>
+    </figure>
+
+    <form class="panel" id="setup">
+      <fieldset>
+        <legend>Campaña</legend>
+        <div class="camps">
+          <label class="camp"><input type="radio" name="phase" value="1" id="phase1" checked><img class="px" src="img/titlepic1.png" alt=""><span><b>Fase 1</b><small>4 episodios · 36 niveles, al estilo de Doom (1993)</small></span></label>
+          <label class="camp"><input type="radio" name="phase" value="2" id="phase2"><img class="px" src="img/titlepic2.png" alt=""><span><b>Fase 2</b><small>32 niveles con superescopeta, al estilo de Doom II</small></span></label>
+        </div>
+      </fieldset>
+
+      <div>
+        <label class="label" for="start">Empezar en</label>
+        <select class="select" id="start"></select>
+      </div>
+
+      <fieldset class="skills" id="skills">
+        <legend>Dificultad</legend>
+      </fieldset>
+
+      <fieldset class="opts">
+        <legend>Opciones</legend>
+        <label class="opt"><input type="checkbox" id="run" checked><span>Correr siempre<small>Como en los ports modernos. Desactívalo para andar y correr con Shift.</small></span></label>
+        <label class="opt"><input type="checkbox" id="novert" checked><span>El ratón solo gira<small>Mover el ratón adelante o atrás no te desplaza.</small></span></label>
+        <label class="opt"><input type="checkbox" id="music" checked><span>Música<small>Emulación del chip OPL3 de una Sound Blaster.</small></span></label>
+      </fieldset>
+
+      <div class="play">
+        <button type="submit" id="play">Jugar</button>
+        <p id="play-note">Descarga 10,5 MB la primera vez</p>
+      </div>
+    </form>
+  </section>
+
+  <div class="info">
+    <section>
+      <h2>Controles</h2>
+      <dl class="keys">
+        <dt>Moverse</dt><dd><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dd>
+        <dt>Girar</dt><dd>ratón <span class="or">o</span> <kbd>←</kbd><kbd>→</kbd></dd>
+        <dt>Disparar</dt><dd>clic izquierdo <span class="or">o</span> <kbd>Ctrl</kbd></dd>
+        <dt>Abrir, pulsar</dt><dd><kbd>E</kbd><kbd>Espacio</kbd> <span class="or">o</span> clic derecho</dd>
+        <dt>Armas</dt><dd><kbd>1</kbd>–<kbd>7</kbd> <span class="or">o</span> rueda del ratón</dd>
+        <dt>Mapa</dt><dd><kbd>Tab</kbd></dd>
+        <dt>Menú y pausa</dt><dd><kbd>Esc</kbd></dd>
+        <dt>Guardar, cargar</dt><dd><kbd>F2</kbd><kbd>F3</kbd> <span class="or">rápido</span> <kbd>F6</kbd><kbd>F9</kbd></dd>
+        <dt>Tamaño de vista</dt><dd><kbd>-</kbd><kbd>=</kbd></dd>
+      </dl>
+    </section>
+    <section>
+      <h2>Trucos clásicos</h2>
+      <ul class="cheats">
+        <li><code>IDDQD</code>invulnerable</li>
+        <li><code>IDKFA</code>todas las armas, llaves y munición</li>
+        <li><code>IDCLIP</code>atravesar paredes</li>
+        <li><code>IDDT</code>en el mapa, revela todo</li>
+        <li><code>IDCLEV13</code>saltar a E1M3 (Fase 2: <code>IDCLEV07</code>)</li>
+      </ul>
+      <p style="margin-top: 12px">En el móvil aparecen controles en pantalla: palanca a la izquierda para moverte y arrastre en la mitad derecha para girar.</p>
+    </section>
+    <section>
+      <h2>Créditos</h2>
+      <ul class="credits">
+        <li><b>Motor:</b> <a href="https://github.com/chocolate-doom/chocolate-doom" target="_blank" rel="noopener">Chocolate Doom</a> (GPL-2.0), a partir del código fuente de Doom publicado por id Software, en la adaptación a WebAssembly de <a href="https://github.com/cloudflare/doom-wasm" target="_blank" rel="noopener">Cloudflare</a> con <a href="engine/doom-wasm-patch.txt" target="_blank" rel="noopener">parches propios</a> (commit 65e0d3a).</li>
+        <li><b>Recursos:</b> <a href="https://freedoom.github.io" target="_blank" rel="noopener">Freedoom</a> 0.13.0 (licencia BSD): mapas, sprites, texturas, sonidos y música.</li>
+        <li>Averno no usa ningún archivo del Doom comercial.</li>
+      </ul>
+    </section>
+  </div>
+</main>
+
+<div id="stage" hidden>
+  <div id="screen"></div>
+  <div id="bar">
+    <span class="where" id="where">Fase 1</span>
+    <button class="tb" id="btn-sound" type="button" aria-pressed="false">Silenciar</button>
+    <button class="tb" id="btn-full" type="button">Pantalla completa</button>
+    <button class="tb" id="btn-quit" type="button">Salir</button>
+  </div>
+  <button id="hint" type="button" hidden>Haz clic para capturar el ratón · <b>Esc</b> lo libera y abre el menú</button>
+  <div id="touch" hidden>
+    <div id="look"></div>
+    <div id="pad"><div id="knob"></div></div>
+    <div class="tbtns">
+      <button type="button" class="menu" data-act="menu">Menú</button>
+      <button type="button" class="next" data-act="next">Arma</button>
+      <button type="button" class="fire" data-act="fire">Fuego</button>
+      <button type="button" class="map" data-act="map">Mapa</button>
+      <button type="button" class="use" data-act="use">Usar</button>
+    </div>
+  </div>
+  <div id="loader">
+    <div class="box">
+      <img id="load-pic" class="px" src="img/titlepic1.png" alt="" width="320" height="200">
+      <p id="load-text">Preparando…</p>
+      <div class="meter"><i id="load-fill"></i></div>
+    </div>
+  </div>
+  <div id="fail" hidden>
+    <div class="box">
+      <h2>El motor se ha detenido</h2>
+      <p id="fail-text"></p>
+      <pre id="fail-log" hidden></pre>
+      <button class="tb" id="fail-back" type="button">Volver al lanzador</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+
+  // ---------- data ----------
+  const EPISODES = [
+    ['Outpost Outbreak', ['Outer Prison', 'Communications Center', 'Waste Disposal', 'Supply Depot', 'Armory', 'Training Facility', 'Xenobiotic Materials Lab', 'Outpost Quarry', 'Nutrient Recycling']],
+    ['Military Labs', ['Elemental Gate', 'Shifter', 'Reclaimed Facilities', 'Flooded Installation', 'Underground Hub', 'Hidden Sector', 'Control Complex', 'Containment Cell', 'Fortress 31']],
+    ['Event Horizon', ['Land of the Lost', 'Geothermal Tunnels', 'Sacrificial Bastion', 'Oblation Temple', 'Infernal Hallows', 'Igneous Intrusion', 'No Regrets', 'Ancient Lair', 'Acquainted With Grief']],
+    ['Double Impact', ['Maintenance Area', 'Research Complex', 'Central Computing', 'Hydroponic Facility', 'Engineering Station', 'Command Center', 'Waste Treatment', 'Launch Bay', 'Operations']],
+  ];
+  const MAPS2 = ['Hydroelectric Plant', 'Filtration Tunnels', 'Crude Processing Center', 'Containment Bay', 'Sludge Burrow', 'Janus Terminal', 'Logic Gate', 'Astronomy Complex', 'Datacenter', 'Deadly Outlands', 'Dimensional Rift Observatory', 'Railroads', 'Station Earth', 'Nuclear Zone', 'Hostile Takeover', 'Urban Jungle', 'City Capitol', 'Aquatics Lab', 'Sewage Control', 'Blood Ember Fortress', 'Under Realm', 'Remanasu', 'Underground Facility', 'Abandoned Teleporter Lab', 'Persistence of Memory', 'Dark Depths', 'Palace of Red', 'Grim Redoubt', 'Melting Point', 'Jaws of Defeat', 'Be Quiet', 'Not Sure'];
+  const PHASES = {
+    1: { wad: 'freedoom1.wad', json: 13941999, size: 28795076, mb: '10,5', name: 'Fase 1', pic: 'img/titlepic1.png',
+         eps: EPISODES.map((e, i) => `<li><b>E${i + 1}</b> ${e[0]}</li>`).join('') },
+    2: { wad: 'freedoom2.wad', json: 14816751, size: 28787748, mb: '11,1', name: 'Fase 2', pic: 'img/titlepic2.png',
+         eps: '<li><b>MAP01–30</b> campaña</li><li><b>MAP31–32</b> niveles secretos</li>' },
+  };
+  const SKILLS = [
+    ['¡No me mates, por favor!', "Please don't kill me!", 'Recibes la mitad de daño y el doble de munición.'],
+    ['¿Esto va a doler?', 'Will this hurt?', 'Menos monstruos.'],
+    ['Que venga el dolor.', 'Bring on the pain.', 'La experiencia estándar.'],
+    ['Carnicería extrema.', 'Extreme Carnage.', 'Más monstruos y más duros de pelar.'],
+    ['¡CAOS!', 'MAYHEM!', 'Monstruos rápidos que resucitan. Sin piedad.'],
+  ];
+
+  // Doom key codes (doomkeys.h) used by the touch controls.
+  const K = { up: 0xad, down: 0xaf, left: 0xac, right: 0xae, enter: 13, esc: 27, tab: 9, back: 0x7f, w: 119, a: 97, s: 115, d: 100, e: 101, y: 121, n: 110 };
+  const ST = { MENU: 1, LEVEL: 2, MAP: 4, PAUSED: 8, DEMO: 16, DEAD: 32 };
+
+  // ---------- launcher ----------
+  const store = {
+    get() { try { return JSON.parse(localStorage.getItem('averno') || '{}'); } catch { return {}; } },
+    set(v) { try { localStorage.setItem('averno', JSON.stringify(v)); } catch { /* private mode */ } },
+  };
+
+  const skillBox = $('skills');
+  SKILLS.forEach(([es, en, desc], i) => {
+    const l = document.createElement('label');
+    l.className = 'skill';
+    l.innerHTML = `<input type="radio" name="skill" value="${i + 1}" id="skill${i + 1}"><img class="px" src="img/face${i + 1}.png" alt=""><span><b></b><i></i><small></small></span>`;
+    l.querySelector('b').textContent = es;
+    l.querySelector('i').textContent = en;
+    l.querySelector('small').textContent = desc;
+    skillBox.appendChild(l);
+  });
+  const skillNote = document.createElement('p');
+  skillNote.className = 'note';
+  skillNote.id = 'skill-note';
+  skillNote.textContent = 'Desde el menú principal, la dificultad se elige dentro del juego (Nueva partida).';
+  skillBox.appendChild(skillNote);
+
+  function fillStart(phase, keep) {
+    const sel = $('start');
+    sel.innerHTML = '';
+    const add = (parent, value, text) => { const o = document.createElement('option'); o.value = value; o.textContent = text; parent.appendChild(o); };
+    add(sel, 'menu', 'Menú principal (con demos)');
+    if (phase === 1) {
+      EPISODES.forEach(([ep, maps], e) => {
+        const g = document.createElement('optgroup');
+        g.label = `Episodio ${e + 1}: ${ep}`;
+        maps.forEach((m, i) => add(g, `${e + 1}.${i + 1}`, `E${e + 1}M${i + 1} · ${m}`));
+        sel.appendChild(g);
+      });
+    } else {
+      const g = document.createElement('optgroup');
+      g.label = 'Niveles';
+      MAPS2.forEach((m, i) => add(g, String(i + 1), `MAP${String(i + 1).padStart(2, '0')} · ${m}`));
+      sel.appendChild(g);
+    }
+    sel.value = [...sel.options].some((o) => o.value === keep) ? keep : 'menu';
+  }
+
+  function readForm() {
+    return {
+      phase: +document.querySelector('input[name=phase]:checked').value,
+      start: $('start').value,
+      skill: +(document.querySelector('input[name=skill]:checked')?.value || 3),
+      run: $('run').checked, novert: $('novert').checked, music: $('music').checked,
+    };
+  }
+
+  function syncForm() {
+    const f = readForm();
+    const p = PHASES[f.phase];
+    $('shot').src = p.pic;
+    $('shot').alt = `Pantalla de título de Freedoom: ${p.name}`;
+    $('shot-name').textContent = p.name;
+    $('shot-eps').innerHTML = p.eps;
+    const fromMenu = f.start === 'menu';
+    skillBox.classList.toggle('off', fromMenu);
+    $('skill-note').hidden = !fromMenu;
+    $('play-note').textContent = wadCache[f.phase] ? 'Listo para jugar' : `Descarga ${p.mb} MB la primera vez`;
+    store.set(f);
+  }
+
+  const saved = store.get();
+  const phase0 = saved.phase === 2 ? 2 : 1;
+  $(`phase${phase0}`).checked = true;
+  fillStart(phase0, saved.start);
+  $(`skill${saved.skill >= 1 && saved.skill <= 5 ? saved.skill : 3}`).checked = true;
+  for (const k of ['run', 'novert', 'music']) if (typeof saved[k] === 'boolean') $(k).checked = saved[k];
+
+  $('setup').addEventListener('change', (e) => {
+    if (e.target.name === 'phase') fillStart(readForm().phase, $('start').value);
+    syncForm();
+  });
+  $('setup').addEventListener('submit', (e) => { e.preventDefault(); launch(readForm()); });
+
+  // ---------- engine loading ----------
+  const wadCache = {};
+  const engines = {};
+  syncForm();
+
+  function wasmAllowed() {
+    try { new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0])); return true; } catch { return false; }
+  }
+
+  // WebAssembly build first; the plain JavaScript build (slower, same game) when the
+  // browser or the page's content policy refuses WebAssembly.
+  function loadEngine(asm) {
+    const kind = asm ? 'asm' : 'wasm';
+    if (!engines[kind]) {
+      const src = asm ? 'engine/doom-asm.js' : 'engine/doom.js';
+      engines[kind] = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = () => resolve(asm ? window.createDoomAsm : window.createDoom);
+        s.onerror = () => { engines[kind] = null; reject(new Error(`No se pudo cargar ${src}.`)); };
+        document.head.appendChild(s);
+      });
+    }
+    return engines[kind];
+  }
+
+  async function createEngine(options) {
+    const wasm = typeof WebAssembly === 'object' && wasmAllowed();
+    if (wasm) {
+      try { return await (await loadEngine(false))(options()); } catch (err) { console.warn('WebAssembly falló, se usa la versión JavaScript', err); }
+    }
+    return (await loadEngine(true))(options());
+  }
+
+  const fmtMB = (b) => (b / 1e6).toLocaleString('es-ES', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+  async function fetchWad(phase, progress) {
+    if (wadCache[phase]) return wadCache[phase];
+    const p = PHASES[phase];
+    const res = await fetch(`data/${p.wad}.json`);
+    if (!res.ok) throw new Error(`No se pudo descargar ${p.wad} (HTTP ${res.status}).`);
+    const reader = res.body.getReader();
+    const chunks = [];
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      got += value.length;
+      progress(Math.min(got / p.json, 1) * 0.9, `Descargando Freedoom: ${p.name} · ${fmtMB(got)} de ${fmtMB(p.json)} MB`);
+    }
+    progress(0.92, 'Descomprimiendo los recursos…');
+    const { b64, size } = JSON.parse(await new Blob(chunks).text());
+    let gz;
+    if (Uint8Array.fromBase64) gz = Uint8Array.fromBase64(b64);
+    else { const bin = atob(b64); gz = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) gz[i] = bin.charCodeAt(i); }
+    const wad = new Uint8Array(await new Response(new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+    if (wad.length !== size) throw new Error(`${p.wad} llegó incompleto.`);
+    wadCache[phase] = wad;
+    return wad;
+  }
+
+  // ---------- configuration files ----------
+  // Keys in Chocolate Doom's config files are PC scancodes.
+  const BASE_CFG = {
+    mouse_sensitivity: 7, sfx_volume: 8, music_volume: 8, show_messages: 1, screenblocks: 10, detaillevel: 0,
+    key_right: 77, key_left: 75, key_up: 17, key_down: 31, key_strafeleft: 30, key_straferight: 32,
+    key_fire: 29, key_use: 18, key_use_alt: 57, key_strafe: 56, key_speed: 42,
+    use_mouse: 1, mouseb_fire: 0, mouseb_strafe: -1, mouseb_forward: -1, snd_channels: 8, snd_musicdevice: 3, snd_sfxdevice: 3,
+  };
+  const BASE_EXTRA = {
+    mouseb_use: 1, mouseb_prevweapon: 3, mouseb_nextweapon: 4, dclick_use: 0, mouse_acceleration: '1.500000',
+  };
+  const FORCED_EXTRA = { fullscreen: 0, window_width: 1280, window_height: 960, aspect_ratio_correct: 1, startup_delay: 0, show_endoom: 0, grabmouse: 1 };
+
+  function editCfg(FS, path, defaults, forced) {
+    const lines = [];
+    const at = {};
+    try {
+      for (const line of FS.readFile(path, { encoding: 'utf8' }).split('\n')) {
+        const m = line.match(/^(\S+)\s+(.*)$/);
+        if (m) { at[m[1]] = lines.length; lines.push([m[1], m[2]]); }
+      }
+    } catch { /* first run */ }
+    const put = (k, v, keep) => {
+      if (k in at) { if (!keep) lines[at[k]][1] = String(v); } else { at[k] = lines.length; lines.push([k, String(v)]); }
+    };
+    for (const [k, v] of Object.entries(defaults)) put(k, v, true);
+    for (const [k, v] of Object.entries(forced)) put(k, v, false);
+    FS.writeFile(path, lines.map(([k, v]) => `${k.padEnd(30)}${v}`).join('\n') + '\n');
+  }
+
+  // ---------- running game ----------
+  const stage = $('stage'), screen = $('screen');
+  let game = null; // { mod, canvas, phase, persist, exited, log }
+
+  function setLoad(frac, text) {
+    $('load-fill').style.width = `${Math.round(frac * 100)}%`;
+    if (text) $('load-text').textContent = text;
+  }
+
+  function fitCanvas() {
+    if (!game) return;
+    const r = screen.getBoundingClientRect();
+    let w = r.width, h = (w * 3) / 4;
+    if (h > r.height) { h = r.height; w = (h * 4) / 3; }
+    game.canvas.style.width = `${Math.floor(w)}px`;
+    game.canvas.style.height = `${Math.floor(h)}px`;
+  }
+
+  const syncfs = (mod, populate) => new Promise((resolve) => {
+    try { mod.FS.syncfs(populate, (err) => resolve(!err)); } catch { resolve(false); }
+  });
+
+  async function launch(f) {
+    if (game) return;
+    const p = PHASES[f.phase];
+    $('launcher').hidden = true;
+    stage.hidden = false;
+    $('loader').hidden = false;
+    $('fail').hidden = true;
+    $('load-pic').src = p.pic;
+    const where = f.start === 'menu' ? p.name : `${p.name} · ${$('start').selectedOptions[0].textContent}`;
+    $('where').textContent = where;
+    setLoad(0, 'Cargando el motor…');
+    setTouch(touchMode);
+
+    const canvas = document.createElement('canvas');
+    canvas.id = 'canvas';
+    canvas.tabIndex = -1;
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    // Touch screens have no mouse to capture; a stray lock would swallow every tap.
+    canvas.requestPointerLock = function () { if (!touchMode) return Element.prototype.requestPointerLock.apply(this, arguments); };
+    screen.appendChild(canvas);
+    game = { canvas, phase: f.phase, log: [], exited: false, mod: null };
+    const current = game;
+    fitCanvas();
+
+    try {
+      const wad = await fetchWad(f.phase, setLoad);
+      if (game !== current) return;
+      setLoad(0.96, 'Arrancando el motor…');
+      const log = (t, err) => { current.log.push(t); if (current.log.length > 60) current.log.shift(); if (err) console.warn(t); };
+      current.booting = true;
+      const mod = await createEngine(() => ({
+        canvas,
+        print: (t) => log(t),
+        printErr: (t) => log(t, true),
+        onExit: (code) => engineExit(current, code),
+        onAbort: (what) => engineExit(current, 1, String(what)),
+        onPersist: () => { clearTimeout(current.persist); current.persist = setTimeout(() => syncfs(mod, false), 300); },
+      }));
+      current.booting = false;
+      if (game !== current) return;
+      current.mod = mod;
+      const FS = mod.FS;
+      FS.writeFile(`/${p.wad}`, wad);
+      FS.mkdir('/data');
+      let saves = true;
+      try { FS.mount(mod.IDBFS || FS.filesystems.IDBFS, {}, '/data'); saves = await syncfs(mod, true); } catch { saves = false; }
+      current.saves = saves;
+      const dir = `/data/saves/${p.wad.replace('.wad', '')}`;
+      for (const d of ['/data/saves', dir]) { try { FS.mkdir(d); } catch { /* exists */ } }
+      editCfg(FS, '/data/default.cfg', BASE_CFG, { joyb_speed: f.run ? 29 : 2 });
+      editCfg(FS, '/data/chocolate-doom.cfg', BASE_EXTRA, { ...FORCED_EXTRA, novert: f.novert ? 1 : 0 });
+
+      const args = ['-iwad', `/${p.wad}`, '-config', '/data/default.cfg', '-extraconfig', '/data/chocolate-doom.cfg', '-savedir', dir, '-window'];
+      if (!f.music) args.push('-nomusic');
+      if (f.start !== 'menu') {
+        args.push('-skill', String(f.skill));
+        if (f.phase === 1) args.push('-warp', ...f.start.split('.')); else args.push('-warp', f.start);
+      }
+      setLoad(1, 'Arrancando el motor…');
+      $('loader').hidden = true;
+      canvas.focus();
+      try { mod.callMain(args); } catch (e) { if (!/ExitStatus|unwind/i.test(String(e && (e.name || e)))) throw e; }
+      if (!saves) $('where').textContent = `${where} · sin guardado permanente en este navegador`;
+      tick();
+    } catch (err) {
+      if (game === current) showFail(err.message || String(err), current.log);
+    }
+  }
+
+  function engineExit(g, code, why) {
+    if (g.exited || g.booting) return;
+    g.exited = true;
+    if (g.mod) syncfs(g.mod, false);
+    if (game !== g) return;
+    if (code === 0 && !why) { closeStage(); return; }
+    const last = g.log.filter((l) => /error|fail|I_Error|R_/i.test(l)).pop();
+    showFail(why || last || `El juego terminó con el código ${code}.`, g.log);
+  }
+
+  function showFail(text, log) {
+    $('loader').hidden = true;
+    $('fail').hidden = false;
+    $('fail-text').textContent = text;
+    const pre = $('fail-log');
+    pre.hidden = !log || !log.length;
+    if (log) pre.textContent = log.slice(-20).join('\n');
+    $('fail-back').focus();
+  }
+
+  function closeStage() {
+    releaseTouch();
+    if (document.pointerLockElement) document.exitPointerLock();
+    if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+    if (game) game.canvas.remove();
+    game = null;
+    // The engine has shut SDL down; release its audio device too.
+    for (const g of masters) { try { if (g.context.state !== 'closed') g.context.close(); } catch { /* already gone */ } }
+    masters.clear();
+    stage.hidden = true;
+    stage.classList.remove('locked');
+    $('launcher').hidden = false;
+    syncForm();
+    $('play').focus();
+  }
+
+  $('fail-back').addEventListener('click', () => {
+    if (game && game.mod && !game.exited) { try { game.mod._web_quit(); } catch { /* engine gone */ } }
+    closeStage();
+  });
+  $('btn-quit').addEventListener('click', () => {
+    const g = game;
+    if (!g || !g.mod || g.exited) { closeStage(); return; }
+    try { g.mod._web_quit(); } catch { closeStage(); return; }
+    setTimeout(() => { if (game === g && !g.exited) { g.exited = true; closeStage(); } }, 2000);
+  });
+  $('btn-full').addEventListener('click', () => {
+    if (document.fullscreenElement) { document.exitFullscreen?.().catch(() => {}); return; }
+    const req = stage.requestFullscreen || stage.webkitRequestFullscreen;
+    if (!req) return;
+    Promise.resolve(req.call(stage)).then(() => {
+      if (touchMode) screen.orientation?.lock?.('landscape').catch(() => {});
+    }).catch(() => {});
+  });
+  document.addEventListener('fullscreenchange', () => {
+    $('btn-full').textContent = document.fullscreenElement ? 'Salir de pantalla completa' : 'Pantalla completa';
+    requestAnimationFrame(fitCanvas);
+  });
+  window.addEventListener('resize', fitCanvas);
+
+  // Master volume: every audio graph the engine connects to the speakers goes through one gain.
+  let muted = false;
+  const masters = new Set();
+  const connect = AudioNode.prototype.connect;
+  AudioNode.prototype.connect = function (dest, ...rest) {
+    if (typeof AudioDestinationNode !== 'undefined' && dest instanceof AudioDestinationNode) {
+      const ctx = dest.context;
+      if (!ctx.__averno) {
+        ctx.__averno = ctx.createGain();
+        ctx.__averno.gain.value = muted ? 0 : 1;
+        connect.call(ctx.__averno, dest);
+        masters.add(ctx.__averno);
+      }
+      return connect.call(this, ctx.__averno, ...rest);
+    }
+    return connect.call(this, dest, ...rest);
+  };
+  $('btn-sound').addEventListener('click', (e) => {
+    muted = !muted;
+    for (const g of masters) g.gain.value = muted ? 0 : 1;
+    e.currentTarget.setAttribute('aria-pressed', String(muted));
+    e.currentTarget.textContent = muted ? 'Activar sonido' : 'Silenciar';
+  });
+
+  // ---------- engine input bridge ----------
+  const engine = () => (game && game.mod && !game.exited ? game.mod : null);
+  const state = () => { const m = engine(); try { return m ? m._web_state() : 0; } catch { return 0; } };
+  const key = (down, code) => { const m = engine(); if (m) m._web_key(down ? 1 : 0, code); };
+  const tap = (code) => { key(true, code); setTimeout(() => key(false, code), 60); };
+
+  // Pointer lock: the engine locks the mouse while playing. If the player (not the engine)
+  // releases it, open the menu so the game pauses.
+  let engineUnlock = false;
+  const exitLock = document.exitPointerLock;
+  if (exitLock) document.exitPointerLock = function () { engineUnlock = true; return exitLock.apply(this, arguments); };
+  document.addEventListener('pointerlockchange', () => {
+    const locked = !!document.pointerLockElement;
+    stage.classList.toggle('locked', locked);
+    if (!locked && !engineUnlock && engine()) {
+      setTimeout(() => { const s = state(); if ((s & ST.LEVEL) && !(s & ST.MENU)) tap(K.esc); }, 150);
+    }
+    engineUnlock = false;
+  });
+  const pauseIfPlaying = () => { const s = state(); if ((s & ST.LEVEL) && !(s & (ST.MENU | ST.DEMO))) tap(K.esc); };
+  document.addEventListener('visibilitychange', () => {
+    const m = engine();
+    if (!m) return;
+    if (document.hidden) { pauseIfPlaying(); try { m._web_save_settings(); } catch { /* ignore */ } }
+  });
+  window.addEventListener('pagehide', () => { const m = engine(); if (m) { try { m._web_save_settings(); } catch { /* ignore */ } } });
+  $('hint').addEventListener('click', () => { if (game) game.canvas.requestPointerLock?.(); });
+
+  function tick() {
+    if (!engine()) { $('hint').hidden = true; return; }
+    const s = state();
+    $('hint').hidden = touchMode || !!document.pointerLockElement || !(s & ST.LEVEL) || !!(s & ST.MENU);
+    const menu = !!(s & ST.MENU) || !(s & ST.LEVEL);
+    if (menu !== touchMenu) setTouchMenu(menu);
+    setTimeout(tick, 150);
+  }
+
+  // Test hook for the local harness (tools/averno-play.mjs).
+  if (/dev\.html$/.test(location.pathname)) window.__averno = { state, key, tap, engine };
+
+  // ---------- touch controls ----------
+  let touchMode = matchMedia('(pointer: coarse)').matches;
+  let touchMenu = false;
+  const held = new Set();
+  function setTouch(on) {
+    touchMode = on;
+    if (on && document.pointerLockElement) document.exitPointerLock();
+    $('touch').hidden = !on;
+    stage.classList.toggle('touch', on);
+    requestAnimationFrame(fitCanvas);
+  }
+  stage.addEventListener('touchstart', () => { if (!touchMode) setTouch(true); }, { passive: true });
+
+  const LABELS = { fire: ['Fuego', 'Entrar'], use: ['Usar', 'Sí'], next: ['Arma', 'No'], map: ['Mapa', 'Atrás'], menu: ['Menú', 'Menú'] };
+  function setTouchMenu(menu) {
+    touchMenu = menu;
+    releaseTouch();
+    document.querySelectorAll('.tbtns button').forEach((b) => { b.textContent = LABELS[b.dataset.act][menu ? 1 : 0]; });
+  }
+  function releaseTouch() {
+    for (const code of held) key(false, code);
+    held.clear();
+    try { engine()?._web_mouse_button(0, 0); } catch { /* ignore */ }
+    padDirs = new Set();
+    clearTimeout(menuRepeat);
+    clearInterval(menuRepeat);
+    $('knob').style.transform = '';
+    document.querySelectorAll('.tbtns .on').forEach((b) => b.classList.remove('on'));
+  }
+
+  // Stick: digital directions, like the keyboard (Doom movement is not analog).
+  const pad = $('pad'), knob = $('knob');
+  let padId = null, padDirs = new Set(), menuRepeat = 0;
+  function padMove(e) {
+    const r = pad.getBoundingClientRect();
+    const rad = r.width / 2;
+    let dx = e.clientX - (r.left + rad), dy = e.clientY - (r.top + rad);
+    const len = Math.hypot(dx, dy), max = rad - 20;
+    if (len > max) { dx *= max / len; dy *= max / len; }
+    knob.style.transform = `translate(${dx}px, ${dy}px)`;
+    const nx = dx / max, ny = dy / max, t = 0.35;
+    const dirs = new Set();
+    if (ny < -t) dirs.add('up');
+    if (ny > t) dirs.add('down');
+    if (nx < -t) dirs.add('left');
+    if (nx > t) dirs.add('right');
+    if (touchMenu) {
+      // Menus: tap the arrow keys, repeating while held.
+      const fresh = [...dirs].filter((d) => !padDirs.has(d));
+      padDirs = dirs;
+      fresh.forEach((d) => tap(K[d]));
+      if (fresh.length) {
+        clearTimeout(menuRepeat);
+        clearInterval(menuRepeat);
+        menuRepeat = setTimeout(() => { menuRepeat = setInterval(() => padDirs.forEach((d) => tap(K[d])), 180); }, 420);
+      }
+      if (!dirs.size) { clearTimeout(menuRepeat); clearInterval(menuRepeat); }
+      return;
+    }
+    const codes = { up: K.w, down: K.s, left: K.a, right: K.d };
+    for (const d of padDirs) if (!dirs.has(d)) { key(false, codes[d]); held.delete(codes[d]); }
+    for (const d of dirs) if (!padDirs.has(d)) { key(true, codes[d]); held.add(codes[d]); }
+    padDirs = dirs;
+  }
+  function padEnd() {
+    const codes = { up: K.w, down: K.s, left: K.a, right: K.d };
+    if (!touchMenu) for (const d of padDirs) { key(false, codes[d]); held.delete(codes[d]); }
+    padDirs = new Set();
+    padId = null;
+    clearTimeout(menuRepeat);
+    clearInterval(menuRepeat);
+    knob.style.transform = '';
+  }
+  pad.addEventListener('pointerdown', (e) => { e.preventDefault(); padId = e.pointerId; pad.setPointerCapture(e.pointerId); padMove(e); });
+  pad.addEventListener('pointermove', (e) => { if (e.pointerId === padId) padMove(e); });
+  pad.addEventListener('pointerup', (e) => { if (e.pointerId === padId) padEnd(); });
+  pad.addEventListener('pointercancel', (e) => { if (e.pointerId === padId) padEnd(); });
+
+  // Look: horizontal drags turn, like the mouse.
+  const look = $('look');
+  let lookId = null, lookX = 0, lookRest = 0;
+  look.addEventListener('pointerdown', (e) => { e.preventDefault(); lookId = e.pointerId; lookX = e.clientX; look.setPointerCapture(e.pointerId); });
+  look.addEventListener('pointermove', (e) => {
+    if (e.pointerId !== lookId || touchMenu) return;
+    const d = (e.clientX - lookX) * 6 + lookRest;
+    lookX = e.clientX;
+    const whole = Math.trunc(d);
+    lookRest = d - whole;
+    const m = engine();
+    if (m && whole) m._web_mouse_move(whole, 0);
+  });
+  const lookEnd = (e) => { if (e.pointerId === lookId) lookId = null; };
+  look.addEventListener('pointerup', lookEnd);
+  look.addEventListener('pointercancel', lookEnd);
+
+  // The game samples held buttons once per tic (1/35 s): keep a quick tap down long enough to count.
+  const MIN_HOLD = 70;
+  document.querySelectorAll('.tbtns button').forEach((b) => {
+    const act = b.dataset.act;
+    let since = 0;
+    const down = (e) => {
+      e.preventDefault();
+      b.setPointerCapture(e.pointerId);
+      b.classList.add('on');
+      since = performance.now();
+      const m = engine();
+      if (!m) return;
+      if (act === 'menu') tap(K.esc);
+      else if (act === 'map') tap(touchMenu ? K.back : K.tab);
+      else if (act === 'next') { if (touchMenu) tap(K.n); else { m._web_mouse_button(4, 1); m._web_mouse_button(4, 0); } }
+      else if (act === 'fire') { if (touchMenu) tap(K.enter); else m._web_mouse_button(0, 1); }
+      else if (act === 'use') { if (touchMenu) tap(K.y); else { key(true, K.e); held.add(K.e); } }
+    };
+    const up = () => {
+      b.classList.remove('on');
+      const release = () => {
+        const m = engine();
+        if (!m) return;
+        if (act === 'fire' && !touchMenu) m._web_mouse_button(0, 0);
+        if (act === 'use' && held.has(K.e)) { key(false, K.e); held.delete(K.e); }
+      };
+      setTimeout(release, Math.max(0, MIN_HOLD - (performance.now() - since)));
+    };
+    b.addEventListener('pointerdown', down);
+    b.addEventListener('pointerup', up);
+    b.addEventListener('pointercancel', up);
+  });
+})();
+</script>
